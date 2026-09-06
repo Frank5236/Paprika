@@ -1,0 +1,2099 @@
+import json
+import sys
+import traceback
+from datetime import datetime, timedelta
+from pathlib import Path
+from statistics import median
+
+import cv2
+
+from PySide6.QtCore import (
+    Qt,
+    QObject,
+    QThread,
+    Signal,
+    QTimer,
+)
+
+from PySide6.QtGui import QPixmap
+
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+    QFileDialog,
+    QMessageBox,
+    QGroupBox,
+    QProgressBar,
+    QTextEdit,
+)
+
+
+ANALYSIS_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "analysis"
+)
+
+sys.path.insert(
+    0,
+    str(ANALYSIS_DIR)
+)
+
+from leaf_segmentation.leaf_segmenter import (
+    LeafSegmenter
+)
+
+
+MODEL_PATH = Path(
+    r"C:\paprika\images\sam2.1_b.pt"
+)
+
+RESULTS_ROOT = Path(
+    r"C:\paprika\results\segmentation"
+)
+
+PERFORMANCE_HISTORY_FILE = (
+    RESULTS_ROOT
+    / "performance_history.json"
+)
+
+INITIAL_BASELINE_SECONDS = 169.67
+
+INITIAL_BASELINE_PIXELS = (
+    546 * 572
+)
+
+
+class PerformanceHistory:
+
+    def __init__(
+        self,
+        history_file
+    ):
+
+        self.history_file = Path(
+            history_file
+        )
+
+    def load(self):
+
+        if not self.history_file.exists():
+
+            return []
+
+        try:
+
+            with self.history_file.open(
+                "r",
+                encoding="utf-8"
+            ) as file:
+
+                data = json.load(
+                    file
+                )
+
+            if isinstance(
+                data,
+                list
+            ):
+
+                return data
+
+        except Exception as exc:
+
+            print(
+                "[PERFORMANCE HISTORY] "
+                f"Could not load history: {exc}",
+                flush=True
+            )
+
+        return []
+
+    def save_run(
+        self,
+        model_name,
+        extension,
+        width,
+        height,
+        duration_seconds
+    ):
+
+        self.history_file.parent.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        history = self.load()
+
+        entry = {
+            "timestamp": datetime.now().isoformat(
+                timespec="seconds"
+            ),
+            "model": model_name,
+            "extension": extension,
+            "width": width,
+            "height": height,
+            "megapixels": (
+                (width * height)
+                / 1_000_000
+            ),
+            "duration_seconds": round(
+                duration_seconds,
+                3
+            ),
+        }
+
+        history.append(
+            entry
+        )
+
+        with self.history_file.open(
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            json.dump(
+                history,
+                file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+    def estimate_duration(
+        self,
+        model_name,
+        extension,
+        width,
+        height
+    ):
+
+        megapixels = (
+            (width * height)
+            / 1_000_000
+        )
+
+        history = self.load()
+
+        relevant = []
+
+        for entry in history:
+
+            if entry.get(
+                "model"
+            ) != model_name:
+
+                continue
+
+            if entry.get(
+                "extension"
+            ) != extension:
+
+                continue
+
+            entry_mp = entry.get(
+                "megapixels"
+            )
+
+            entry_duration = entry.get(
+                "duration_seconds"
+            )
+
+            if not entry_mp:
+                continue
+
+            if not entry_duration:
+                continue
+
+            normalized_time = (
+                entry_duration
+                / entry_mp
+            )
+
+            relevant.append(
+                normalized_time
+            )
+
+        if relevant:
+
+            seconds_per_mp = median(
+                relevant
+            )
+
+            estimated = (
+                seconds_per_mp
+                * megapixels
+            )
+
+            return max(
+                estimated,
+                1.0
+            )
+
+        baseline_mp = (
+            INITIAL_BASELINE_PIXELS
+            / 1_000_000
+        )
+
+        baseline_seconds_per_mp = (
+            INITIAL_BASELINE_SECONDS
+            / baseline_mp
+        )
+
+        estimated = (
+            baseline_seconds_per_mp
+            * megapixels
+        )
+
+        return max(
+            estimated,
+            1.0
+        )
+
+
+class SegmentationWorker(QObject):
+
+    stage = Signal(str)
+
+    progress = Signal(int)
+
+    busy = Signal(bool)
+
+    finished = Signal(object)
+
+    error = Signal(str, str)
+
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        image_path,
+        model_path
+    ):
+
+        super().__init__()
+
+        self.image_path = Path(
+            image_path
+        )
+
+        self.model_path = Path(
+            model_path
+        )
+
+        self.stop_requested = False
+
+    def log(
+        self,
+        message
+    ):
+
+        print(
+            f"[SEGMENTATION WORKER] {message}",
+            flush=True
+        )
+
+    def request_stop(
+        self
+    ):
+
+        self.stop_requested = True
+
+        self.log(
+            "STOP requested by user."
+        )
+
+    def check_stop(
+        self
+    ):
+
+        if self.stop_requested:
+
+            self.busy.emit(
+                False
+            )
+
+            self.stage.emit(
+                "SEGMENTATION STOPPED BY USER"
+            )
+
+            self.log(
+                "Segmentation stopped."
+            )
+
+            self.cancelled.emit()
+
+            return True
+
+        return False
+
+    def create_run_directory(
+        self
+    ):
+
+        RESULTS_ROOT.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        base_name = self.image_path.stem
+
+        timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S_%f"
+        )
+
+        run_name = (
+            f"{base_name}_{timestamp}"
+        )
+
+        run_directory = (
+            RESULTS_ROOT
+            / run_name
+        )
+
+        run_directory.mkdir(
+            parents=True,
+            exist_ok=False
+        )
+
+        for directory_name in (
+            "original",
+            "masks",
+            "leaves",
+            "overlay",
+        ):
+
+            (
+                run_directory
+                / directory_name
+            ).mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+        destination = (
+            run_directory
+            / "original"
+            / self.image_path.name
+        )
+
+        import shutil
+
+        shutil.copy2(
+            self.image_path,
+            destination
+        )
+
+        self.log(
+            f"Run directory created: "
+            f"{run_directory}"
+        )
+
+        return run_directory
+
+    def run(
+        self
+    ):
+
+        run_directory = None
+
+        try:
+
+            # ----------------------------------------------
+            # STEP 1
+            # ----------------------------------------------
+
+            self.stage.emit(
+                "STEP 1/8 - Checking input image..."
+            )
+
+            image = cv2.imread(
+                str(
+                    self.image_path
+                )
+            )
+
+            if image is None:
+
+                raise ValueError(
+                    f"Could not read image:\n"
+                    f"{self.image_path}"
+                )
+
+            height, width = (
+                image.shape[:2]
+            )
+
+            self.log(
+                f"Image size: "
+                f"{width} x {height}"
+            )
+
+            self.progress.emit(
+                5
+            )
+
+            if self.check_stop():
+                return
+
+            # ----------------------------------------------
+            # STEP 2
+            # ----------------------------------------------
+
+            self.stage.emit(
+                "STEP 2/8 - Checking SAM 2 model..."
+            )
+
+            if not self.model_path.exists():
+
+                raise FileNotFoundError(
+                    f"SAM 2 model not found:\n"
+                    f"{self.model_path}"
+                )
+
+            self.progress.emit(
+                10
+            )
+
+            if self.check_stop():
+                return
+
+            # ----------------------------------------------
+            # STEP 3
+            # ----------------------------------------------
+
+            self.stage.emit(
+                "STEP 3/8 - Creating result directory..."
+            )
+
+            run_directory = (
+                self.create_run_directory()
+            )
+
+            self.progress.emit(
+                15
+            )
+
+            if self.check_stop():
+                return
+
+            # ----------------------------------------------
+            # STEP 4
+            # ----------------------------------------------
+
+            self.stage.emit(
+                "STEP 4/8 - Loading SAM 2 model..."
+            )
+
+            segmenter = LeafSegmenter(
+                model_path=str(
+                    self.model_path
+                )
+            )
+
+            segmenter.load_model()
+
+            self.progress.emit(
+                20
+            )
+
+            if self.check_stop():
+                return
+
+            # ----------------------------------------------
+            # STEP 5
+            # ----------------------------------------------
+
+            self.stage.emit(
+                "STEP 5/8 - Running SAM 2 segmentation..."
+            )
+
+            self.busy.emit(
+                True
+            )
+
+            leaves = segmenter.segment(
+                str(
+                    self.image_path
+                )
+            )
+
+            self.busy.emit(
+                False
+            )
+
+            if self.check_stop():
+                return
+
+            total_masks = len(
+                leaves
+            )
+
+            self.log(
+                f"Inference completed. "
+                f"Masks detected: {total_masks}"
+            )
+
+            self.progress.emit(
+                65
+            )
+
+            self.stage.emit(
+                (
+                    f"Segmentation completed - "
+                    f"{total_masks} masks"
+                )
+            )
+
+            # ----------------------------------------------
+            # STEP 6
+            # ----------------------------------------------
+
+            self.stage.emit(
+                "STEP 6/8 - Processing masks and leaves..."
+            )
+
+            overlay = image.copy()
+
+            for index, leaf in enumerate(
+                leaves
+            ):
+
+                if self.check_stop():
+                    return
+
+                leaf_id = leaf[
+                    "id"
+                ]
+
+                message = (
+                    f"Processing mask "
+                    f"{index + 1}/{total_masks}"
+                )
+
+                self.stage.emit(
+                    message
+                )
+
+                self.log(
+                    message
+                )
+
+                mask = leaf[
+                    "mask"
+                ]
+
+                colored_mask = (
+                    image * 0
+                ).astype(
+                    image.dtype
+                )
+
+                colored_mask[
+                    mask > 0
+                ] = (
+                    0,
+                    255,
+                    0
+                )
+
+                overlay = cv2.addWeighted(
+                    overlay,
+                    0.70,
+                    colored_mask,
+                    0.30,
+                    0
+                )
+
+                mask_path = (
+                    run_directory
+                    / "masks"
+                    / f"mask_{leaf_id:03d}.png"
+                )
+
+                if not cv2.imwrite(
+                    str(mask_path),
+                    mask
+                ):
+
+                    raise IOError(
+                        f"Failed to save mask:\n"
+                        f"{mask_path}"
+                    )
+
+                x1, y1, x2, y2 = (
+                    leaf[
+                        "bbox"
+                    ]
+                )
+
+                crop = image[
+                    y1:y2 + 1,
+                    x1:x2 + 1
+                ]
+
+                if crop.size > 0:
+
+                    leaf_path = (
+                        run_directory
+                        / "leaves"
+                        / f"leaf_{leaf_id:03d}.png"
+                    )
+
+                    if not cv2.imwrite(
+                        str(leaf_path),
+                        crop
+                    ):
+
+                        raise IOError(
+                            f"Failed to save leaf:\n"
+                            f"{leaf_path}"
+                        )
+
+                if total_masks > 0:
+
+                    progress = (
+                        65
+                        + int(
+                            (
+                                (index + 1)
+                                / total_masks
+                            )
+                            * 20
+                        )
+                    )
+
+                    self.progress.emit(
+                        progress
+                    )
+
+            if self.check_stop():
+                return
+
+            # ----------------------------------------------
+            # STEP 7
+            # ----------------------------------------------
+
+            self.stage.emit(
+                "STEP 7/8 - Saving overlay..."
+            )
+
+            overlay_path = (
+                run_directory
+                / "overlay"
+                / "overlay.jpg"
+            )
+
+            if not cv2.imwrite(
+                str(overlay_path),
+                overlay
+            ):
+
+                raise IOError(
+                    f"Failed to save overlay:\n"
+                    f"{overlay_path}"
+                )
+
+            self.progress.emit(
+                95
+            )
+
+            # ----------------------------------------------
+            # STEP 8
+            # ----------------------------------------------
+
+            self.stage.emit(
+                "STEP 8/8 - Finalizing results..."
+            )
+
+            self.progress.emit(
+                100
+            )
+
+            completed_message = (
+                f"COMPLETED - "
+                f"{total_masks} masks"
+            )
+
+            self.stage.emit(
+                completed_message
+            )
+
+            self.finished.emit(
+                {
+                    "mask_count": total_masks,
+                    "run_directory": str(
+                        run_directory
+                    ),
+                    "overlay": str(
+                        overlay_path
+                    ),
+                    "width": width,
+                    "height": height,
+                }
+            )
+
+        except Exception as exc:
+
+            self.busy.emit(
+                False
+            )
+
+            error_type = type(
+                exc
+            ).__name__
+
+            error_message = str(
+                exc
+            )
+
+            full_traceback = (
+                traceback.format_exc()
+            )
+
+            print(
+                "",
+                flush=True
+            )
+
+            print(
+                "=" * 80,
+                flush=True
+            )
+
+            print(
+                "LEAF SEGMENTATION ERROR",
+                flush=True
+            )
+
+            print(
+                f"ERROR TYPE: {error_type}",
+                flush=True
+            )
+
+            print(
+                f"ERROR MESSAGE: {error_message}",
+                flush=True
+            )
+
+            print(
+                "-" * 80,
+                flush=True
+            )
+
+            print(
+                full_traceback,
+                flush=True
+            )
+
+            print(
+                "=" * 80,
+                flush=True
+            )
+
+            self.error.emit(
+                error_type,
+                (
+                    f"ERROR MESSAGE:\n"
+                    f"{error_message}\n\n"
+                    f"FULL TRACEBACK:\n"
+                    f"{full_traceback}"
+                )
+            )
+
+
+class ImageAnalysis(QWidget):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.setWindowTitle(
+            "PAPRIKA - IMAGE ANALYSIS"
+        )
+
+        self.resize(
+            1000,
+            700
+        )
+
+        self.selected_image = None
+
+        self.thread = None
+
+        self.worker = None
+
+        self.run_start_time = None
+
+        self.estimated_total_seconds = None
+
+        self.timer = QTimer(
+            self
+        )
+
+        self.timer.setInterval(
+            1000
+        )
+
+        self.timer.timeout.connect(
+            self.update_runtime_display
+        )
+
+        self.performance_history = (
+            PerformanceHistory(
+                PERFORMANCE_HISTORY_FILE
+            )
+        )
+
+        self.create_ui()
+
+    def create_ui(self):
+
+        layout = QVBoxLayout(
+            self
+        )
+
+        title = QLabel(
+            "IMAGE ANALYSIS"
+        )
+
+        title.setStyleSheet(
+            "font-size: 28px; "
+            "font-weight: bold;"
+        )
+
+        layout.addWidget(
+            title
+        )
+
+        image_group = QGroupBox(
+            "INPUT IMAGE"
+        )
+
+        image_layout = QHBoxLayout(
+            image_group
+        )
+
+        self.select_button = QPushButton(
+            "SELECT IMAGE"
+        )
+
+        self.image_name_label = QLabel(
+            "No image selected"
+        )
+
+        image_layout.addWidget(
+            self.select_button
+        )
+
+        image_layout.addWidget(
+            self.image_name_label
+        )
+
+        layout.addWidget(
+            image_group
+        )
+
+        preview_group = QGroupBox(
+            "IMAGE PREVIEW"
+        )
+
+        preview_layout = QVBoxLayout(
+            preview_group
+        )
+
+        self.image_preview = QLabel(
+            "Select an image"
+        )
+
+        self.image_preview.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        self.image_preview.setMinimumSize(
+            0,
+            0
+        )
+
+        self.image_preview.setStyleSheet(
+            "border: 1px solid gray;"
+        )
+
+        preview_layout.addWidget(
+            self.image_preview
+        )
+
+        layout.addWidget(
+            preview_group
+        )
+
+        segmentation_group = QGroupBox(
+            "LEAF SEGMENTATION"
+        )
+
+        segmentation_layout = QVBoxLayout(
+            segmentation_group
+        )
+
+        button_layout = QHBoxLayout()
+
+        self.segment_button = QPushButton(
+            "RUN LEAF SEGMENTATION"
+        )
+
+        self.segment_button.setMinimumHeight(
+            45
+        )
+
+        self.segment_button.setEnabled(
+            False
+        )
+
+        self.stop_button = QPushButton(
+            "STOP SEGMENTATION"
+        )
+
+        self.stop_button.setMinimumHeight(
+            45
+        )
+
+        self.stop_button.setEnabled(
+            False
+        )
+
+        button_layout.addWidget(
+            self.segment_button
+        )
+
+        button_layout.addWidget(
+            self.stop_button
+        )
+
+        segmentation_layout.addLayout(
+            button_layout
+        )
+
+        # --------------------------------------------------
+        # CURRENT OPERATION
+        # --------------------------------------------------
+
+        current_label = QLabel(
+            "CURRENT OPERATION:"
+        )
+
+        current_label.setStyleSheet(
+            "font-weight: bold;"
+        )
+
+        segmentation_layout.addWidget(
+            current_label
+        )
+
+        self.status_label = QLabel(
+            "Ready"
+        )
+
+        self.status_label.setStyleSheet(
+            "font-weight: bold;"
+        )
+
+        segmentation_layout.addWidget(
+            self.status_label
+        )
+
+        # --------------------------------------------------
+        # TIME INFORMATION
+        # --------------------------------------------------
+
+        timing_group = QGroupBox(
+            "PROCESSING TIME"
+        )
+
+        timing_layout = QVBoxLayout(
+            timing_group
+        )
+
+        self.start_time_label = QLabel(
+            "START TIME: -"
+        )
+
+        self.elapsed_time_label = QLabel(
+            "ELAPSED: 00:00"
+        )
+
+        self.remaining_time_label = QLabel(
+            "ESTIMATED REMAINING: -"
+        )
+
+        self.end_time_label = QLabel(
+            "ESTIMATED END: -"
+        )
+
+        self.estimate_basis_label = QLabel(
+            "ESTIMATE BASIS: -"
+        )
+
+        timing_layout.addWidget(
+            self.start_time_label
+        )
+
+        timing_layout.addWidget(
+            self.elapsed_time_label
+        )
+
+        timing_layout.addWidget(
+            self.remaining_time_label
+        )
+
+        timing_layout.addWidget(
+            self.end_time_label
+        )
+
+        timing_layout.addWidget(
+            self.estimate_basis_label
+        )
+
+        segmentation_layout.addWidget(
+            timing_group
+        )
+
+        # --------------------------------------------------
+        # ACTIVITY LOG
+        # --------------------------------------------------
+
+        log_label = QLabel(
+            "ACTIVITY LOG:"
+        )
+
+        log_label.setStyleSheet(
+            "font-weight: bold;"
+        )
+
+        segmentation_layout.addWidget(
+            log_label
+        )
+
+        self.stage_log = QTextEdit()
+
+        self.stage_log.setReadOnly(
+            True
+        )
+
+        self.stage_log.setMinimumHeight(
+            60
+        )
+
+        self.stage_log.setMaximumHeight(
+            150
+        )
+
+        segmentation_layout.addWidget(
+            self.stage_log
+        )
+
+        # --------------------------------------------------
+        # PROGRESS
+        # --------------------------------------------------
+
+        progress_label = QLabel(
+            "PROGRESS:"
+        )
+
+        progress_label.setStyleSheet(
+            "font-weight: bold;"
+        )
+
+        segmentation_layout.addWidget(
+            progress_label
+        )
+
+        self.progress_bar = QProgressBar()
+
+        self.progress_bar.setMinimum(
+            0
+        )
+
+        self.progress_bar.setMaximum(
+            100
+        )
+
+        self.progress_bar.setValue(
+            0
+        )
+
+        segmentation_layout.addWidget(
+            self.progress_bar
+        )
+
+        layout.addWidget(
+            segmentation_group
+        )
+
+        self.select_button.clicked.connect(
+            self.select_image
+        )
+
+        self.segment_button.clicked.connect(
+            self.run_segmentation
+        )
+
+        self.stop_button.clicked.connect(
+            self.stop_segmentation
+        )
+
+    def log(
+        self,
+        message
+    ):
+
+        print(
+            f"[IMAGE ANALYSIS] {message}",
+            flush=True
+        )
+
+    def add_stage_message(
+        self,
+        message
+    ):
+
+        timestamp = datetime.now().strftime(
+            "%H:%M:%S"
+        )
+
+        self.stage_log.append(
+            f"[{timestamp}] {message}"
+        )
+
+        scrollbar = (
+            self.stage_log
+            .verticalScrollBar()
+        )
+
+        scrollbar.setValue(
+            scrollbar.maximum()
+        )
+
+    def format_duration(
+        self,
+        seconds
+    ):
+
+        seconds = max(
+            0,
+            int(seconds)
+        )
+
+        hours = (
+            seconds // 3600
+        )
+
+        minutes = (
+            (seconds % 3600)
+            // 60
+        )
+
+        secs = (
+            seconds % 60
+        )
+
+        if hours > 0:
+
+            return (
+                f"{hours:02d}:"
+                f"{minutes:02d}:"
+                f"{secs:02d}"
+            )
+
+        return (
+            f"{minutes:02d}:"
+            f"{secs:02d}"
+        )
+
+    def select_image(
+        self
+    ):
+
+        try:
+
+            file_path, _ = (
+                QFileDialog.getOpenFileName(
+                    self,
+                    "Select Image",
+                    r"C:\paprika\images",
+                    (
+                        "Image Files "
+                        "(*.jpg *.jpeg *.png *.bmp "
+                        "*.tif *.tiff *.webp)"
+                    )
+                )
+            )
+
+            if not file_path:
+
+                return
+
+            self.selected_image = Path(
+                file_path
+            )
+
+            self.image_name_label.setText(
+                self.selected_image.name
+            )
+
+            self.show_image(
+                self.selected_image
+            )
+
+            self.segment_button.setEnabled(
+                True
+            )
+
+            self.stop_button.setEnabled(
+                False
+            )
+
+            self.status_label.setText(
+                "Image selected - ready"
+            )
+
+            self.stage_log.clear()
+
+            self.add_stage_message(
+                "Image selected successfully."
+            )
+
+            self.start_time_label.setText(
+                "START TIME: -"
+            )
+
+            self.elapsed_time_label.setText(
+                "ELAPSED: 00:00"
+            )
+
+            self.remaining_time_label.setText(
+                "ESTIMATED REMAINING: -"
+            )
+
+            self.end_time_label.setText(
+                "ESTIMATED END: -"
+            )
+
+            self.estimate_basis_label.setText(
+                "ESTIMATE BASIS: -"
+            )
+
+            self.progress_bar.setMaximum(
+                100
+            )
+
+            self.progress_bar.setValue(
+                0
+            )
+
+        except Exception as exc:
+
+            self.handle_error(
+                "IMAGE SELECTION ERROR",
+                exc
+            )
+
+    def show_image(
+        self,
+        image_path
+    ):
+
+        pixmap = QPixmap(
+            str(image_path)
+        )
+
+        if pixmap.isNull():
+
+            raise ValueError(
+                f"Could not load image:\n"
+                f"{image_path}"
+            )
+
+        self.update_image_preview(
+            pixmap
+        )
+
+    def update_image_preview(
+        self,
+        pixmap
+    ):
+
+        if pixmap.isNull():
+
+            return
+
+        scaled_pixmap = pixmap.scaled(
+            self.image_preview.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+        self.image_preview.setPixmap(
+            scaled_pixmap
+        )
+
+    def resizeEvent(
+        self,
+        event
+    ):
+
+        super().resizeEvent(
+            event
+        )
+
+        if self.selected_image is not None:
+
+            pixmap = QPixmap(
+                str(
+                    self.selected_image
+                )
+            )
+
+            if not pixmap.isNull():
+
+                self.update_image_preview(
+                    pixmap
+                )
+
+    def run_segmentation(
+        self
+    ):
+
+        if self.selected_image is None:
+
+            QMessageBox.warning(
+                self,
+                "IMAGE ANALYSIS",
+                "Please select an image first."
+            )
+
+            return
+
+        if self.thread is not None:
+
+            return
+
+        # --------------------------------------------------
+        # READ IMAGE DIMENSIONS
+        # --------------------------------------------------
+
+        image = cv2.imread(
+            str(
+                self.selected_image
+            )
+        )
+
+        if image is None:
+
+            QMessageBox.critical(
+                self,
+                "IMAGE ANALYSIS",
+                "Could not read the selected image."
+            )
+
+            return
+
+        height, width = (
+            image.shape[:2]
+        )
+
+        extension = (
+            self.selected_image.suffix.lower()
+        )
+
+        model_name = (
+            self.model_name()
+        )
+
+        self.estimated_total_seconds = (
+            self.performance_history.estimate_duration(
+                model_name,
+                extension,
+                width,
+                height
+            )
+        )
+
+        # --------------------------------------------------
+        # START TIME
+        # --------------------------------------------------
+
+        self.run_start_time = datetime.now()
+
+        estimated_end = (
+            self.run_start_time
+            + timedelta(
+                seconds=self.estimated_total_seconds
+            )
+        )
+
+        self.start_time_label.setText(
+            (
+                "START TIME: "
+                f"{self.run_start_time.strftime('%H:%M:%S')}"
+            )
+        )
+
+        self.elapsed_time_label.setText(
+            "ELAPSED: 00:00"
+        )
+
+        self.remaining_time_label.setText(
+            (
+                "ESTIMATED REMAINING: "
+                f"{self.format_duration(self.estimated_total_seconds)}"
+            )
+        )
+
+        self.end_time_label.setText(
+            (
+                "ESTIMATED END: "
+                f"{estimated_end.strftime('%H:%M:%S')}"
+            )
+        )
+
+        self.estimate_basis_label.setText(
+            (
+                "ESTIMATE BASIS: "
+                f"{width}x{height} | "
+                f"{(width * height) / 1_000_000:.2f} MP | "
+                f"{model_name}"
+            )
+        )
+
+        self.timer.start()
+
+        # --------------------------------------------------
+        # UI
+        # --------------------------------------------------
+
+        self.stage_log.clear()
+
+        self.add_stage_message(
+            (
+                "Starting leaf segmentation..."
+            )
+        )
+
+        self.status_label.setText(
+            "Starting..."
+        )
+
+        self.progress_bar.setMaximum(
+            100
+        )
+
+        self.progress_bar.setValue(
+            0
+        )
+
+        self.select_button.setEnabled(
+            False
+        )
+
+        self.segment_button.setEnabled(
+            False
+        )
+
+        self.stop_button.setEnabled(
+            True
+        )
+
+        self.log(
+            f"Starting segmentation: "
+            f"{self.selected_image}"
+        )
+
+        self.log(
+            "Estimated total time: "
+            f"{self.format_duration(self.estimated_total_seconds)}"
+        )
+
+        self.thread = QThread()
+
+        self.worker = SegmentationWorker(
+            image_path=str(
+                self.selected_image
+            ),
+            model_path=str(
+                MODEL_PATH
+            )
+        )
+
+        self.worker.moveToThread(
+            self.thread
+        )
+
+        self.thread.started.connect(
+            self.worker.run
+        )
+
+        self.worker.stage.connect(
+            self.on_stage
+        )
+
+        self.worker.progress.connect(
+            self.on_progress
+        )
+
+        self.worker.busy.connect(
+            self.on_busy
+        )
+
+        self.worker.finished.connect(
+            self.on_finished
+        )
+
+        self.worker.error.connect(
+            self.on_error
+        )
+
+        self.worker.cancelled.connect(
+            self.on_cancelled
+        )
+
+        self.worker.finished.connect(
+            self.thread.quit
+        )
+
+        self.worker.error.connect(
+            self.thread.quit
+        )
+
+        self.worker.cancelled.connect(
+            self.thread.quit
+        )
+
+        self.thread.finished.connect(
+            self.worker.deleteLater
+        )
+
+        self.thread.finished.connect(
+            self.thread_finished
+        )
+
+        self.thread.start()
+
+    def model_name(
+        self
+    ):
+
+        return self.model_path_name(
+            MODEL_PATH
+        )
+
+    def model_path_name(
+        self,
+        path
+    ):
+
+        return Path(
+            path
+        ).name
+
+    def update_runtime_display(
+        self
+    ):
+
+        if self.run_start_time is None:
+
+            return
+
+        elapsed = (
+            datetime.now()
+            - self.run_start_time
+        ).total_seconds()
+
+        self.elapsed_time_label.setText(
+            (
+                "ELAPSED: "
+                f"{self.format_duration(elapsed)}"
+            )
+        )
+
+        if (
+            self.estimated_total_seconds is None
+        ):
+
+            return
+
+        remaining = (
+            self.estimated_total_seconds
+            - elapsed
+        )
+
+        if remaining < 0:
+
+            remaining_display = (
+                "00:00"
+            )
+
+        else:
+
+            remaining_display = (
+                self.format_duration(
+                    remaining
+                )
+            )
+
+        estimated_end = (
+            self.run_start_time
+            + timedelta(
+                seconds=self.estimated_total_seconds
+            )
+        )
+
+        self.remaining_time_label.setText(
+            (
+                "ESTIMATED REMAINING: "
+                f"{remaining_display}"
+            )
+        )
+
+        self.end_time_label.setText(
+            (
+                "ESTIMATED END: "
+                f"{estimated_end.strftime('%H:%M:%S')}"
+            )
+        )
+
+    def stop_segmentation(
+        self
+    ):
+
+        if self.worker is None:
+
+            return
+
+        self.log(
+            "User pressed STOP SEGMENTATION."
+        )
+
+        self.stop_button.setEnabled(
+            False
+        )
+
+        self.status_label.setText(
+            "STOP REQUESTED..."
+        )
+
+        self.add_stage_message(
+            (
+                "STOP REQUESTED - "
+                "waiting for current operation to finish..."
+            )
+        )
+
+        self.worker.request_stop()
+
+    def on_stage(
+        self,
+        message
+    ):
+
+        self.status_label.setText(
+            message
+        )
+
+        self.add_stage_message(
+            message
+        )
+
+        self.log(
+            message
+        )
+
+    def on_progress(
+        self,
+        value
+    ):
+
+        self.progress_bar.setMaximum(
+            100
+        )
+
+        self.progress_bar.setValue(
+            value
+        )
+
+    def on_busy(
+        self,
+        is_busy
+    ):
+
+        if is_busy:
+
+            self.progress_bar.setMaximum(
+                0
+            )
+
+            self.status_label.setText(
+                "Running SAM 2 segmentation..."
+            )
+
+            self.add_stage_message(
+                "Running SAM 2 segmentation..."
+            )
+
+            self.log(
+                "SAM 2 inference is running..."
+            )
+
+        else:
+
+            self.progress_bar.setMaximum(
+                100
+            )
+
+    def on_finished(
+        self,
+        result
+    ):
+
+        self.timer.stop()
+
+        mask_count = result[
+            "mask_count"
+        ]
+
+        width = result[
+            "width"
+        ]
+
+        height = result[
+            "height"
+        ]
+
+        if self.run_start_time is not None:
+
+            duration = (
+                datetime.now()
+                - self.run_start_time
+            ).total_seconds()
+
+        else:
+
+            duration = 0
+
+        self.performance_history.save_run(
+            model_name=self.model_name(),
+            extension=self.selected_image.suffix.lower(),
+            width=width,
+            height=height,
+            duration_seconds=duration
+        )
+
+        self.progress_bar.setMaximum(
+            100
+        )
+
+        self.progress_bar.setValue(
+            100
+        )
+
+        elapsed_display = (
+            self.format_duration(
+                duration
+            )
+        )
+
+        message = (
+            f"COMPLETED - "
+            f"{mask_count} masks"
+        )
+
+        self.status_label.setText(
+            message
+        )
+
+        self.add_stage_message(
+            message
+        )
+
+        self.add_stage_message(
+            (
+                "TOTAL TIME: "
+                f"{elapsed_display}"
+            )
+        )
+
+        self.add_stage_message(
+            (
+                "RESULT DIRECTORY: "
+                f"{result['run_directory']}"
+            )
+        )
+
+        self.elapsed_time_label.setText(
+            (
+                "ELAPSED: "
+                f"{elapsed_display}"
+            )
+        )
+
+        self.remaining_time_label.setText(
+            "ESTIMATED REMAINING: 00:00"
+        )
+
+        self.end_time_label.setText(
+            (
+                "FINISHED: "
+                f"{datetime.now().strftime('%H:%M:%S')}"
+            )
+        )
+
+        self.log(
+            message
+        )
+
+        QMessageBox.information(
+            self,
+            "LEAF SEGMENTATION",
+            (
+                "Segmentation completed.\n\n"
+                f"Masks: {mask_count}\n"
+                f"Total time: {elapsed_display}\n\n"
+                "Run directory:\n"
+                f"{result['run_directory']}"
+            )
+        )
+
+    def on_cancelled(
+        self
+    ):
+
+        self.timer.stop()
+
+        self.progress_bar.setMaximum(
+            100
+        )
+
+        self.progress_bar.setValue(
+            0
+        )
+
+        message = (
+            "SEGMENTATION STOPPED BY USER"
+        )
+
+        self.status_label.setText(
+            message
+        )
+
+        self.add_stage_message(
+            message
+        )
+
+        if self.run_start_time is not None:
+
+            elapsed = (
+                datetime.now()
+                - self.run_start_time
+            ).total_seconds()
+
+            self.elapsed_time_label.setText(
+                (
+                    "ELAPSED: "
+                    f"{self.format_duration(elapsed)}"
+                )
+            )
+
+        self.remaining_time_label.setText(
+            "ESTIMATED REMAINING: STOPPED"
+        )
+
+        self.end_time_label.setText(
+            "ESTIMATED END: STOPPED"
+        )
+
+        self.log(
+            message
+        )
+
+    def on_error(
+        self,
+        error_type,
+        error_details
+    ):
+
+        self.timer.stop()
+
+        self.progress_bar.setMaximum(
+            100
+        )
+
+        self.progress_bar.setValue(
+            0
+        )
+
+        self.status_label.setText(
+            "SEGMENTATION FAILED"
+        )
+
+        self.add_stage_message(
+            "SEGMENTATION FAILED"
+        )
+
+        self.add_stage_message(
+            f"ERROR TYPE: {error_type}"
+        )
+
+        self.add_stage_message(
+            error_details
+        )
+
+        QMessageBox.critical(
+            self,
+            "LEAF SEGMENTATION ERROR",
+            (
+                f"ERROR TYPE:\n"
+                f"{error_type}\n\n"
+                f"{error_details}"
+            )
+        )
+
+    def thread_finished(
+        self
+    ):
+
+        self.log(
+            "Segmentation worker finished."
+        )
+
+        if self.thread is not None:
+
+            self.thread.deleteLater()
+
+        self.thread = None
+
+        self.worker = None
+
+        self.select_button.setEnabled(
+            True
+        )
+
+        self.segment_button.setEnabled(
+            self.selected_image is not None
+        )
+
+        self.stop_button.setEnabled(
+            False
+        )
+
+    def handle_error(
+        self,
+        title,
+        exc
+    ):
+
+        self.timer.stop()
+
+        error_type = type(
+            exc
+        ).__name__
+
+        error_message = str(
+            exc
+        )
+
+        full_traceback = (
+            traceback.format_exc()
+        )
+
+        print(
+            "",
+            flush=True
+        )
+
+        print(
+            "=" * 80,
+            flush=True
+        )
+
+        print(
+            title,
+            flush=True
+        )
+
+        print(
+            f"ERROR TYPE: {error_type}",
+            flush=True
+        )
+
+        print(
+            f"ERROR MESSAGE: {error_message}",
+            flush=True
+        )
+
+        print(
+            "-" * 80,
+            flush=True
+        )
+
+        print(
+            full_traceback,
+            flush=True
+        )
+
+        print(
+            "=" * 80,
+            flush=True
+        )
+
+        self.status_label.setText(
+            "ERROR"
+        )
+
+        self.add_stage_message(
+            f"{title}: {error_message}"
+        )
+
+        QMessageBox.critical(
+            self,
+            title,
+            (
+                f"ERROR TYPE:\n"
+                f"{error_type}\n\n"
+                f"ERROR MESSAGE:\n"
+                f"{error_message}\n\n"
+                f"FULL TRACEBACK:\n"
+                f"{full_traceback}"
+            )
+        )
+
+    def closeEvent(
+        self,
+        event
+    ):
+
+        if self.thread is not None:
+
+            reply = QMessageBox.question(
+                self,
+                "SEGMENTATION RUNNING",
+                (
+                    "Segmentation is currently running.\n\n"
+                    "Do you want to stop the operation?"
+                ),
+                (
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No
+                )
+            )
+
+            if reply == (
+                QMessageBox.StandardButton.Yes
+            ):
+
+                self.stop_segmentation()
+
+            event.ignore()
+
+            return
+
+        event.accept()
