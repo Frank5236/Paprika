@@ -1,8 +1,10 @@
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -12,12 +14,184 @@ from PySide6.QtWidgets import (
     QFrame,
     QListWidget,
     QListWidgetItem,
+    QSizePolicy,
 )
 
 
 RESULTS_ROOT = Path(
     r"C:\paprika\results\segmentation"
 )
+
+
+def get_creation_time(file_path):
+
+    try:
+        created_timestamp = file_path.stat().st_ctime
+
+        return datetime.fromtimestamp(
+            created_timestamp
+        ).strftime(
+            "%d/%m/%Y %H:%M:%S"
+        )
+
+    except Exception:
+        return "UNKNOWN"
+
+
+class LeafPreviewLabel(QLabel):
+
+    double_clicked = Signal()
+
+    def mouseDoubleClickEvent(self, event):
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+
+        super().mouseDoubleClickEvent(event)
+
+
+class FullImageViewer(QWidget):
+
+    def __init__(
+        self,
+        title_text,
+        image_path,
+        mask_path=None
+    ):
+
+        super().__init__()
+
+        self.image_path = Path(image_path)
+        self.mask_path = Path(mask_path) if mask_path else None
+
+        self.setWindowTitle(
+            title_text
+        )
+
+        self.resize(
+            1200,
+            850
+        )
+
+        self.create_ui()
+
+    def create_ui(self):
+
+        main_layout = QVBoxLayout(
+            self
+        )
+
+        title = QLabel(
+            self.image_path.name
+        )
+
+        title.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        title.setStyleSheet(
+            "font-size: 20px; font-weight: bold;"
+        )
+
+        main_layout.addWidget(
+            title
+        )
+
+        info = QLabel(
+            (
+                f"CREATED: {get_creation_time(self.image_path)}"
+            )
+        )
+
+        info.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        main_layout.addWidget(
+            info
+        )
+
+        image_scroll = QScrollArea()
+        image_scroll.setWidgetResizable(False)
+
+        image_label = QLabel()
+        image_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        pixmap = QPixmap(
+            str(self.image_path)
+        )
+
+        if pixmap.isNull():
+            image_label.setText(
+                f"Could not load image:\n{self.image_path}"
+            )
+        else:
+            image_label.setPixmap(
+                pixmap
+            )
+            image_label.adjustSize()
+
+        image_scroll.setWidget(
+            image_label
+        )
+
+        main_layout.addWidget(
+            image_scroll,
+            1
+        )
+
+        if self.mask_path is not None and self.mask_path.exists():
+
+            mask_title = QLabel(
+                (
+                    f"MASK    |    CREATED: "
+                    f"{get_creation_time(self.mask_path)}"
+                )
+            )
+
+            mask_title.setAlignment(
+                Qt.AlignmentFlag.AlignCenter
+            )
+
+            mask_title.setStyleSheet(
+                "font-weight: bold;"
+            )
+
+            main_layout.addWidget(
+                mask_title
+            )
+
+            mask_scroll = QScrollArea()
+            mask_scroll.setWidgetResizable(False)
+            mask_label = QLabel()
+            mask_label.setAlignment(
+                Qt.AlignmentFlag.AlignCenter
+            )
+
+            mask_pixmap = QPixmap(
+                str(self.mask_path)
+            )
+
+            if mask_pixmap.isNull():
+                mask_label.setText(
+                    f"Could not load mask:\n{self.mask_path}"
+                )
+            else:
+                mask_label.setPixmap(
+                    mask_pixmap
+                )
+                mask_label.adjustSize()
+
+            mask_scroll.setWidget(
+                mask_label
+            )
+
+            main_layout.addWidget(
+                mask_scroll,
+                1
+            )
 
 
 class SegmentationResults(QWidget):
@@ -31,14 +205,13 @@ class SegmentationResults(QWidget):
         )
 
         self.resize(
-            1100,
-            750
+            1200,
+            800
         )
 
         self.run_viewer = None
 
         self.create_ui()
-
         self.load_runs()
 
     def create_ui(self):
@@ -47,34 +220,24 @@ class SegmentationResults(QWidget):
             self
         )
 
-        # ==================================================
-        # TITLE
-        # ==================================================
-
         title = QLabel(
             "SEGMENTATION RESULTS"
         )
 
         title.setStyleSheet(
-            "font-size: 26px; "
-            "font-weight: bold;"
+            "font-size: 26px; font-weight: bold;"
         )
 
         main_layout.addWidget(
             title
         )
 
-        # ==================================================
-        # RUN LIST
-        # ==================================================
-
         runs_title = QLabel(
             "SEGMENTATION RUNS"
         )
 
         runs_title.setStyleSheet(
-            "font-size: 18px; "
-            "font-weight: bold;"
+            "font-size: 18px; font-weight: bold;"
         )
 
         main_layout.addWidget(
@@ -82,18 +245,15 @@ class SegmentationResults(QWidget):
         )
 
         self.run_list = QListWidget()
-
         self.run_list.setMinimumHeight(
-            180
+            150
         )
 
         main_layout.addWidget(
             self.run_list
         )
 
-        # ==================================================
-        # OPEN BUTTON
-        # ==================================================
+        button_layout = QHBoxLayout()
 
         self.open_button = QPushButton(
             "OPEN SELECTED RUN"
@@ -107,29 +267,25 @@ class SegmentationResults(QWidget):
             False
         )
 
-        main_layout.addWidget(
+        button_layout.addWidget(
             self.open_button
         )
-
-        # ==================================================
-        # REFRESH BUTTON
-        # ==================================================
 
         self.refresh_button = QPushButton(
             "REFRESH RUNS"
         )
 
         self.refresh_button.setMinimumHeight(
-            40
+            45
         )
 
-        main_layout.addWidget(
+        button_layout.addWidget(
             self.refresh_button
         )
 
-        # ==================================================
-        # STATUS
-        # ==================================================
+        main_layout.addLayout(
+            button_layout
+        )
 
         self.status_label = QLabel(
             "Ready"
@@ -142,10 +298,6 @@ class SegmentationResults(QWidget):
         main_layout.addWidget(
             self.status_label
         )
-
-        # ==================================================
-        # SIGNALS
-        # ==================================================
 
         self.run_list.itemSelectionChanged.connect(
             self.on_run_selected
@@ -166,21 +318,13 @@ class SegmentationResults(QWidget):
     def load_runs(self):
 
         self.run_list.clear()
-
-        self.open_button.setEnabled(
-            False
-        )
-
-        self.status_label.setText(
-            "Loading segmentation runs..."
-        )
+        self.open_button.setEnabled(False)
 
         if not RESULTS_ROOT.exists():
 
             self.status_label.setText(
                 "No segmentation runs found."
             )
-
             return
 
         run_directories = sorted(
@@ -189,7 +333,7 @@ class SegmentationResults(QWidget):
                 for path in RESULTS_ROOT.iterdir()
                 if path.is_dir()
             ],
-            key=lambda path: path.stat().st_mtime,
+            key=lambda path: path.stat().st_ctime,
             reverse=True
         )
 
@@ -198,13 +342,18 @@ class SegmentationResults(QWidget):
             self.status_label.setText(
                 "No segmentation runs found."
             )
-
             return
 
         for run_directory in run_directories:
 
+            item_text = (
+                f"{run_directory.name}"
+                f"    |    CREATED: "
+                f"{get_creation_time(run_directory)}"
+            )
+
             item = QListWidgetItem(
-                run_directory.name
+                item_text
             )
 
             item.setData(
@@ -222,38 +371,27 @@ class SegmentationResults(QWidget):
 
     def on_run_selected(self):
 
-        item = (
-            self.run_list.currentItem()
-        )
-
         self.open_button.setEnabled(
-            item is not None
+            self.run_list.currentItem() is not None
         )
 
     def open_selected_run(self):
 
-        item = (
-            self.run_list.currentItem()
-        )
+        item = self.run_list.currentItem()
 
         if item is None:
-
             return
 
         run_directory = item.data(
             Qt.ItemDataRole.UserRole
         )
 
-        self.run_viewer = (
-            SegmentationRunViewer(
-                Path(run_directory)
-            )
+        self.run_viewer = SegmentationRunViewer(
+            Path(run_directory)
         )
 
         self.run_viewer.show()
-
         self.run_viewer.raise_()
-
         self.run_viewer.activateWindow()
 
 
@@ -270,20 +408,21 @@ class SegmentationRunViewer(QWidget):
             run_directory
         )
 
+        self.full_viewer = None
+
         self.setWindowTitle(
             (
-                "PAPRIKA - "
+                "PAPRIKA - SEGMENTATION RUN - "
                 f"{self.run_directory.name}"
             )
         )
 
         self.resize(
-            1150,
-            850
+            1400,
+            900
         )
 
         self.create_ui()
-
         self.load_run()
 
     def create_ui(self):
@@ -292,10 +431,6 @@ class SegmentationRunViewer(QWidget):
             self
         )
 
-        # ==================================================
-        # TITLE
-        # ==================================================
-
         title = QLabel(
             (
                 "SEGMENTATION RUN\n"
@@ -303,125 +438,205 @@ class SegmentationRunViewer(QWidget):
             )
         )
 
+        title.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
         title.setStyleSheet(
-            "font-size: 22px; "
-            "font-weight: bold;"
+            "font-size: 22px; font-weight: bold;"
         )
 
         main_layout.addWidget(
             title
         )
 
-        # ==================================================
-        # ORIGINAL IMAGE
-        # ==================================================
-
-        original_title = QLabel(
-            "ORIGINAL IMAGE"
+        run_info = QLabel(
+            (
+                "RUN CREATED: "
+                f"{get_creation_time(self.run_directory)}"
+            )
         )
 
-        original_title.setStyleSheet(
-            "font-size: 18px; "
-            "font-weight: bold;"
-        )
-
-        main_layout.addWidget(
-            original_title
-        )
-
-        self.original_image = QLabel(
-            "Original image not found."
-        )
-
-        self.original_image.setAlignment(
+        run_info.setAlignment(
             Qt.AlignmentFlag.AlignCenter
         )
 
-        self.original_image.setMinimumHeight(
-            250
-        )
-
-        self.original_image.setStyleSheet(
-            "border: 1px solid gray;"
+        main_layout.addWidget(
+            run_info
         )
 
         main_layout.addWidget(
-            self.original_image
+            QLabel(
+                "SOURCE / SELECTED REGION"
+            )
         )
 
-        # ==================================================
-        # OVERLAY
-        # ==================================================
+        top_row = QHBoxLayout()
 
-        overlay_title = QLabel(
-            "SEGMENTATION OVERLAY"
+        original_panel = self.create_image_panel(
+            "ORIGINAL IMAGE",
+            500
         )
 
-        overlay_title.setStyleSheet(
-            "font-size: 18px; "
-            "font-weight: bold;"
+        self.original_image_label = (
+            original_panel[0]
+        )
+
+        self.original_info_label = (
+            original_panel[1]
+        )
+
+        top_row.addWidget(
+            original_panel[2],
+            1
+        )
+
+        region_panel = self.create_image_panel(
+            "SELECTED REGION / ROI",
+            500
+        )
+
+        self.region_image_label = (
+            region_panel[0]
+        )
+
+        self.region_info_label = (
+            region_panel[1]
+        )
+
+        top_row.addWidget(
+            region_panel[2],
+            1
+        )
+
+        main_layout.addLayout(
+            top_row,
+            3
+        )
+
+        leaves_title = QLabel(
+            "LEAVES"
+        )
+
+        leaves_title.setStyleSheet(
+            "font-size: 18px; font-weight: bold;"
         )
 
         main_layout.addWidget(
-            overlay_title
+            leaves_title
         )
 
-        self.overlay_image = QLabel(
-            "Overlay not found."
-        )
-
-        self.overlay_image.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-
-        self.overlay_image.setMinimumHeight(
-            250
-        )
-
-        self.overlay_image.setStyleSheet(
-            "border: 1px solid gray;"
-        )
-
-        main_layout.addWidget(
-            self.overlay_image
-        )
-
-        # ==================================================
-        # INDIVIDUAL RESULTS
-        # ==================================================
-
-        results_title = QLabel(
-            "INDIVIDUAL LEAF RESULTS"
-        )
-
-        results_title.setStyleSheet(
-            "font-size: 18px; "
-            "font-weight: bold;"
-        )
-
-        main_layout.addWidget(
-            results_title
-        )
-
-        self.scroll_area = QScrollArea()
-
-        self.scroll_area.setWidgetResizable(
+        self.leaves_scroll = QScrollArea()
+        self.leaves_scroll.setWidgetResizable(
             True
         )
-
-        self.results_container = QWidget()
-
-        self.results_layout = QVBoxLayout(
-            self.results_container
+        self.leaves_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.leaves_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
 
-        self.scroll_area.setWidget(
-            self.results_container
+        self.leaves_container = QWidget()
+
+        self.leaves_layout = QHBoxLayout(
+            self.leaves_container
+        )
+
+        self.leaves_layout.setAlignment(
+            Qt.AlignmentFlag.AlignLeft
+            | Qt.AlignmentFlag.AlignTop
+        )
+
+        self.leaves_layout.setSpacing(
+            18
+        )
+
+        self.leaves_scroll.setWidget(
+            self.leaves_container
         )
 
         main_layout.addWidget(
-            self.scroll_area
+            self.leaves_scroll,
+            2
         )
+
+        hint = QLabel(
+            "Double-click any leaf to open it at full size."
+        )
+
+        hint.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        main_layout.addWidget(
+            hint
+        )
+
+    def create_image_panel(
+        self,
+        title_text,
+        max_width
+    ):
+
+        panel = QFrame()
+        panel.setFrameShape(
+            QFrame.Shape.Box
+        )
+        panel.setMinimumWidth(
+            520
+        )
+
+        layout = QVBoxLayout(
+            panel
+        )
+
+        title = QLabel(
+            title_text
+        )
+
+        title.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        title.setStyleSheet(
+            "font-size: 17px; font-weight: bold;"
+        )
+
+        layout.addWidget(
+            title
+        )
+
+        image_label = QLabel()
+        image_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+        image_label.setMinimumHeight(
+            280
+        )
+        image_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
+        image_label.setStyleSheet(
+            "border: 1px solid gray;"
+        )
+
+        layout.addWidget(
+            image_label,
+            1
+        )
+
+        info_label = QLabel()
+        info_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        layout.addWidget(
+            info_label
+        )
+
+        return image_label, info_label, panel
 
     def load_run(self):
 
@@ -430,9 +645,9 @@ class SegmentationRunViewer(QWidget):
             / "original"
         )
 
-        overlay_directory = (
+        roi_directory = (
             self.run_directory
-            / "overlay"
+            / "roi"
         )
 
         leaves_directory = (
@@ -445,10 +660,6 @@ class SegmentationRunViewer(QWidget):
             / "masks"
         )
 
-        # ==================================================
-        # ORIGINAL
-        # ==================================================
-
         original_files = sorted(
             [
                 path
@@ -457,50 +668,79 @@ class SegmentationRunViewer(QWidget):
             ]
         ) if original_directory.exists() else []
 
-        if original_files:
-
-            self.show_image(
-                self.original_image,
-                original_files[0],
-                950,
-                300
-            )
-
-        # ==================================================
-        # OVERLAY
-        # ==================================================
-
-        overlay_files = sorted(
+        roi_files = sorted(
             [
                 path
-                for path in overlay_directory.iterdir()
+                for path in roi_directory.iterdir()
                 if path.is_file()
             ]
-        ) if overlay_directory.exists() else []
+        ) if roi_directory.exists() else []
 
-        if overlay_files:
+        if original_files:
+
+            original_path = original_files[0]
 
             self.show_image(
-                self.overlay_image,
-                overlay_files[0],
-                950,
-                300
+                self.original_image_label,
+                original_path,
+                700,
+                360
             )
 
-        # ==================================================
-        # LEAF FILES
-        # ==================================================
+            self.original_info_label.setText(
+                (
+                    f"FILE: {original_path.name}"
+                    f"    |    CREATED: "
+                    f"{get_creation_time(original_path)}"
+                )
+            )
+
+        if roi_files:
+
+            roi_path = roi_files[0]
+
+            self.show_image(
+                self.region_image_label,
+                roi_path,
+                700,
+                360
+            )
+
+            self.region_info_label.setText(
+                (
+                    f"FILE: {roi_path.name}"
+                    f"    |    CREATED: "
+                    f"{get_creation_time(roi_path)}"
+                )
+            )
+
+        else:
+
+            self.region_image_label.setText(
+                "FULL IMAGE - NO ROI SELECTED"
+            )
+
+            if original_files:
+                self.region_info_label.setText(
+                    (
+                        "Analysis region: FULL IMAGE"
+                        f"    |    CREATED: "
+                        f"{get_creation_time(original_files[0])}"
+                    )
+                )
 
         leaf_files = sorted(
             leaves_directory.glob(
                 "leaf_*.png"
-            )
+            ),
+            key=lambda path: path.name
         ) if leaves_directory.exists() else []
 
         mask_files = sorted(
             masks_directory.glob(
                 "mask_*.png"
-            )
+            ),
+            key=lambda path: path.name
         ) if masks_directory.exists() else []
 
         mask_map = {
@@ -513,32 +753,40 @@ class SegmentationRunViewer(QWidget):
 
         if not leaf_files:
 
-            self.add_message(
+            message = QLabel(
                 "No individual leaf results found."
+            )
+
+            message.setAlignment(
+                Qt.AlignmentFlag.AlignCenter
+            )
+
+            self.leaves_layout.addWidget(
+                message
             )
 
             return
 
         for leaf_path in leaf_files:
 
-            leaf_id = (
-                leaf_path.stem.replace(
-                    "leaf_",
-                    ""
-                )
+            leaf_id = leaf_path.stem.replace(
+                "leaf_",
+                ""
             )
 
-            mask_path = (
-                mask_map.get(
-                    leaf_id
-                )
+            mask_path = mask_map.get(
+                leaf_id
             )
 
-            self.add_leaf_result(
+            self.add_leaf_card(
                 leaf_id,
                 leaf_path,
                 mask_path
             )
+
+        self.leaves_layout.addStretch(
+            1
+        )
 
     def show_image(
         self,
@@ -574,7 +822,7 @@ class SegmentationRunViewer(QWidget):
             scaled
         )
 
-    def add_leaf_result(
+    def add_leaf_card(
         self,
         leaf_id,
         leaf_path,
@@ -587,7 +835,15 @@ class SegmentationRunViewer(QWidget):
             QFrame.Shape.Box
         )
 
-        frame_layout = QVBoxLayout(
+        frame.setMinimumWidth(
+            230
+        )
+
+        frame.setMaximumWidth(
+            260
+        )
+
+        layout = QVBoxLayout(
             frame
         )
 
@@ -600,153 +856,106 @@ class SegmentationRunViewer(QWidget):
         )
 
         title.setStyleSheet(
-            "font-size: 17px; "
-            "font-weight: bold;"
+            "font-size: 16px; font-weight: bold;"
         )
 
-        frame_layout.addWidget(
+        layout.addWidget(
             title
         )
 
-        images_layout = QHBoxLayout()
+        image_label = LeafPreviewLabel()
 
-        # ==================================================
-        # LEAF
-        # ==================================================
-
-        leaf_layout = QVBoxLayout()
-
-        leaf_title = QLabel(
-            "LEAF IMAGE"
-        )
-
-        leaf_title.setAlignment(
+        image_label.setAlignment(
             Qt.AlignmentFlag.AlignCenter
         )
 
-        leaf_label = QLabel()
-
-        leaf_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
+        image_label.setFixedSize(
+            220,
+            190
         )
 
-        leaf_label.setMinimumSize(
-            300,
-            220
+        image_label.setStyleSheet(
+            "border: 1px solid gray;"
         )
 
         self.show_image(
-            leaf_label,
+            image_label,
             leaf_path,
-            300,
-            220
+            210,
+            180
         )
 
-        leaf_layout.addWidget(
-            leaf_title
-        )
-
-        leaf_layout.addWidget(
-            leaf_label
-        )
-
-        # ==================================================
-        # MASK
-        # ==================================================
-
-        mask_layout = QVBoxLayout()
-
-        mask_title = QLabel(
-            "MASK"
-        )
-
-        mask_title.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-
-        mask_label = QLabel()
-
-        mask_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
-
-        mask_label.setMinimumSize(
-            300,
-            220
-        )
-
-        if mask_path is not None:
-
-            self.show_image(
-                mask_label,
+        image_label.double_clicked.connect(
+            lambda: self.open_leaf_full_size(
+                leaf_path,
                 mask_path,
-                300,
-                220
+                leaf_id
             )
-
-        else:
-
-            mask_label.setText(
-                "Mask not found."
-            )
-
-        mask_layout.addWidget(
-            mask_title
         )
 
-        mask_layout.addWidget(
-            mask_label
+        layout.addWidget(
+            image_label
         )
 
-        images_layout.addLayout(
-            leaf_layout
-        )
-
-        images_layout.addLayout(
-            mask_layout
-        )
-
-        frame_layout.addLayout(
-            images_layout
-        )
-
-        info = QLabel(
+        created_label = QLabel(
             (
-                f"Leaf: {leaf_path.name}\n"
-                f"Mask: "
-                f"{mask_path.name}"
-                if mask_path is not None
-                else
-                f"Leaf: {leaf_path.name}\n"
-                "Mask: not found"
+                f"CREATED: "
+                f"{get_creation_time(leaf_path)}"
             )
         )
 
-        info.setAlignment(
+        created_label.setAlignment(
             Qt.AlignmentFlag.AlignCenter
         )
 
-        frame_layout.addWidget(
-            info
+        layout.addWidget(
+            created_label
         )
 
-        self.results_layout.addWidget(
+        layout.addWidget(
+            QLabel(
+                "DOUBLE-CLICK TO OPEN"
+            )
+        )
+
+        self.leaves_layout.addWidget(
             frame
         )
 
-    def add_message(
+    def open_leaf_full_size(
         self,
-        message
+        leaf_path,
+        mask_path,
+        leaf_id
     ):
 
-        label = QLabel(
-            message
+        self.full_viewer = FullImageViewer(
+            (
+                "PAPRIKA - LEAF "
+                f"{leaf_id} - FULL SIZE"
+            ),
+            leaf_path,
+            mask_path
         )
 
-        label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter
-        )
+        self.full_viewer.show()
+        self.full_viewer.raise_()
+        self.full_viewer.activateWindow()
 
-        self.results_layout.addWidget(
-            label
-        )
+    def closeEvent(self, event):
+
+        if self.full_viewer is not None:
+            self.full_viewer.close()
+            self.full_viewer = None
+
+        event.accept()
+
+
+if __name__ == "__main__":
+
+    app = QApplication([])
+
+    window = SegmentationResults()
+    window.show()
+
+    app.exec()

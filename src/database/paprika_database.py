@@ -385,7 +385,9 @@ class PaprikaDatabase:
             ).fetchone()[0]
 
             if foreign_keys != 1:
-                raise RuntimeError("SQLite foreign_keys is not enabled")
+                raise RuntimeError(
+                    "SQLite foreign_keys is not enabled"
+                )
 
         return {
             "database_path": str(self.database_path),
@@ -446,7 +448,362 @@ class PaprikaDatabase:
                     created_at,
                 ),
             )
+
             return cursor.lastrowid
+
+    def create_segmentation_run(
+        self,
+        run_name,
+        media_id,
+        source_file,
+        source_path=None,
+        capture_date=None,
+        capture_time=None,
+        segmentation_date=None,
+        segmentation_time=None,
+        image_width=None,
+        image_height=None,
+        roi_enabled=False,
+        roi_x1=None,
+        roi_y1=None,
+        roi_x2=None,
+        roi_y2=None,
+        model_name=None,
+        model_path=None,
+        status="completed",
+        duration_seconds=None,
+    ):
+        now = datetime.now()
+
+        if segmentation_date is None:
+            segmentation_date = now.strftime("%Y-%m-%d")
+
+        if segmentation_time is None:
+            segmentation_time = now.strftime("%H:%M:%S")
+
+        created_at = now.isoformat(timespec="seconds")
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO segmentation_runs (
+                    run_name,
+                    media_id,
+                    source_file,
+                    source_path,
+                    capture_date,
+                    capture_time,
+                    segmentation_date,
+                    segmentation_time,
+                    image_width,
+                    image_height,
+                    roi_enabled,
+                    roi_x1,
+                    roi_y1,
+                    roi_x2,
+                    roi_y2,
+                    model_name,
+                    model_path,
+                    status,
+                    duration_seconds,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_name,
+                    media_id,
+                    source_file,
+                    source_path,
+                    capture_date,
+                    capture_time,
+                    segmentation_date,
+                    segmentation_time,
+                    image_width,
+                    image_height,
+                    1 if roi_enabled else 0,
+                    roi_x1,
+                    roi_y1,
+                    roi_x2,
+                    roi_y2,
+                    model_name,
+                    model_path,
+                    status,
+                    duration_seconds,
+                    created_at,
+                ),
+            )
+
+            return cursor.lastrowid
+
+    def get_segmentation_run(self, run_id):
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM segmentation_runs
+                WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+
+        return dict(row) if row else None
+
+    def list_segmentation_runs(self):
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM segmentation_runs
+                ORDER BY segmentation_date DESC,
+                         segmentation_time DESC,
+                         id DESC
+                """
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def update_segmentation_run(self, run_id, **fields):
+        allowed_fields = {
+            "run_name",
+            "source_file",
+            "source_path",
+            "capture_date",
+            "capture_time",
+            "segmentation_date",
+            "segmentation_time",
+            "image_width",
+            "image_height",
+            "roi_enabled",
+            "roi_x1",
+            "roi_y1",
+            "roi_x2",
+            "roi_y2",
+            "model_name",
+            "model_path",
+            "status",
+            "duration_seconds",
+        }
+
+        unknown_fields = set(fields) - allowed_fields
+
+        if unknown_fields:
+            raise ValueError(
+                "Unknown segmentation run fields: "
+                + ", ".join(sorted(unknown_fields))
+            )
+
+        if not fields:
+            return False
+
+        columns = []
+        values = []
+
+        for field_name, value in fields.items():
+            if field_name == "roi_enabled":
+                value = 1 if value else 0
+
+            columns.append(f"{field_name} = ?")
+            values.append(value)
+
+        values.append(run_id)
+
+        sql = (
+            "UPDATE segmentation_runs SET "
+            + ", ".join(columns)
+            + " WHERE id = ?"
+        )
+
+        with self.connect() as connection:
+            cursor = connection.execute(sql, values)
+            return cursor.rowcount > 0
+
+    def delete_segmentation_run(self, run_id):
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM segmentation_runs
+                WHERE id = ?
+                """,
+                (run_id,),
+            )
+
+            return cursor.rowcount > 0
+
+    def create_leaf(
+        self,
+        run_id,
+        leaf_number,
+        x1,
+        y1,
+        x2,
+        y2,
+        center_x,
+        center_y,
+        width,
+        height,
+        area,
+        confidence=None,
+        selected=False,
+        saved=False,
+        original_path=None,
+        highlighted_path=None,
+        segmented_path=None,
+        crop_path=None,
+        overlay_path=None,
+        mask_path=None,
+    ):
+        created_at = datetime.now().isoformat(timespec="seconds")
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO leaf_objects (
+                    run_id,
+                    leaf_number,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    center_x,
+                    center_y,
+                    width,
+                    height,
+                    area,
+                    confidence,
+                    selected,
+                    saved,
+                    original_path,
+                    highlighted_path,
+                    segmented_path,
+                    crop_path,
+                    overlay_path,
+                    mask_path,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    leaf_number,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    center_x,
+                    center_y,
+                    width,
+                    height,
+                    area,
+                    confidence,
+                    1 if selected else 0,
+                    1 if saved else 0,
+                    original_path,
+                    highlighted_path,
+                    segmented_path,
+                    crop_path,
+                    overlay_path,
+                    mask_path,
+                    created_at,
+                ),
+            )
+
+            return cursor.lastrowid
+
+    def get_leaf(self, leaf_id):
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM leaf_objects
+                WHERE id = ?
+                """,
+                (leaf_id,),
+            ).fetchone()
+
+        return dict(row) if row else None
+
+    def list_leaves_by_run(self, run_id):
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM leaf_objects
+                WHERE run_id = ?
+                ORDER BY leaf_number
+                """,
+                (run_id,),
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def update_leaf(self, leaf_id, **fields):
+        allowed_fields = {
+            "leaf_number",
+            "x1",
+            "y1",
+            "x2",
+            "y2",
+            "center_x",
+            "center_y",
+            "width",
+            "height",
+            "area",
+            "confidence",
+            "selected",
+            "saved",
+            "original_path",
+            "highlighted_path",
+            "segmented_path",
+            "crop_path",
+            "overlay_path",
+            "mask_path",
+        }
+
+        unknown_fields = set(fields) - allowed_fields
+
+        if unknown_fields:
+            raise ValueError(
+                "Unknown leaf fields: "
+                + ", ".join(sorted(unknown_fields))
+            )
+
+        if not fields:
+            return False
+
+        columns = []
+        values = []
+
+        for field_name, value in fields.items():
+            if field_name in {"selected", "saved"}:
+                value = 1 if value else 0
+
+            columns.append(f"{field_name} = ?")
+            values.append(value)
+
+        values.append(leaf_id)
+
+        sql = (
+            "UPDATE leaf_objects SET "
+            + ", ".join(columns)
+            + " WHERE id = ?"
+        )
+
+        with self.connect() as connection:
+            cursor = connection.execute(sql, values)
+            return cursor.rowcount > 0
+
+    def delete_leaf(self, leaf_id):
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM leaf_objects
+                WHERE id = ?
+                """,
+                (leaf_id,),
+            )
+
+            return cursor.rowcount > 0
 
     def create_test_record(self):
         now = datetime.now()
@@ -463,89 +820,45 @@ class PaprikaDatabase:
             capture_time=now.strftime("%H:%M:%S"),
         )
 
-        with self.connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO segmentation_runs (
-                    run_name,
-                    media_id,
-                    source_file,
-                    source_path,
-                    segmentation_date,
-                    segmentation_time,
-                    image_width,
-                    image_height,
-                    status,
-                    created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    f"DB_TEST_{timestamp}",
-                    media_id,
-                    "db_test.jpg",
-                    r"C:\paprika\test\db_test.jpg",
-                    now.strftime("%Y-%m-%d"),
-                    now.strftime("%H:%M:%S"),
-                    100,
-                    100,
-                    "completed",
-                    now.isoformat(timespec="seconds"),
-                ),
-            )
+        run_id = self.create_segmentation_run(
+            run_name=f"DB_TEST_{timestamp}",
+            media_id=media_id,
+            source_file="db_test.jpg",
+            source_path=r"C:\paprika\test\db_test.jpg",
+            image_width=100,
+            image_height=100,
+            status="completed",
+        )
 
-            run_id = cursor.lastrowid
-
-            cursor = connection.execute(
-                """
-                INSERT INTO leaf_objects (
-                    run_id,
-                    leaf_number,
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    center_x,
-                    center_y,
-                    width,
-                    height,
-                    area,
-                    confidence,
-                    saved,
-                    created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    1,
-                    10,
-                    20,
-                    60,
-                    80,
-                    35.0,
-                    50.0,
-                    50,
-                    60,
-                    3000,
-                    0.95,
-                    1,
-                    now.isoformat(timespec="seconds"),
-                ),
-            )
-
-            leaf_id = cursor.lastrowid
+        leaf_id = self.create_leaf(
+            run_id=run_id,
+            leaf_number=1,
+            x1=10,
+            y1=20,
+            x2=60,
+            y2=80,
+            center_x=35.0,
+            center_y=50.0,
+            width=50,
+            height=60,
+            area=3000,
+            confidence=0.95,
+            saved=True,
+        )
 
         return media_id, run_id, leaf_id
 
 
 if __name__ == "__main__":
     database = PaprikaDatabase()
+
     database.create_database(reset=True)
+
     schema = database.validate_schema()
 
     print("PAPRIKA DATABASE CREATED")
     print(schema["database_path"])
     print("TABLES:")
+
     for table_name in schema["tables"]:
         print(f"  {table_name}")

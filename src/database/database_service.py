@@ -6,39 +6,63 @@ from paprika_database import PaprikaDatabase
 
 class DatabaseService:
 
-    def __init__(
-        self,
-        database_path=None
-    ):
+    def __init__(self, database_path=None):
 
         if database_path is None:
-
             self.database = PaprikaDatabase()
-
         else:
+            self.database = PaprikaDatabase(Path(database_path))
 
-            self.database = PaprikaDatabase(
-                Path(database_path)
-            )
+    def create_media(
+        self,
+        file_name,
+        file_path,
+        file_type,
+        extension=None,
+        width=None,
+        height=None,
+        duration_seconds=None,
+        capture_date=None,
+        capture_time=None,
+        file_created_at=None,
+        file_modified_at=None,
+        checksum_sha256=None,
+    ):
 
-        self.database.create_database()
+        return self.database.create_media(
+            file_name=file_name,
+            file_path=file_path,
+            file_type=file_type,
+            extension=extension,
+            width=width,
+            height=height,
+            duration_seconds=duration_seconds,
+            capture_date=capture_date,
+            capture_time=capture_time,
+            file_created_at=file_created_at,
+            file_modified_at=file_modified_at,
+            checksum_sha256=checksum_sha256,
+        )
 
     def create_run(
         self,
         run_name,
+        media_id,
         source_file,
         source_path=None,
         capture_date=None,
         capture_time=None,
         image_width=None,
         image_height=None,
-        roi=None
+        roi=None,
+        model_name=None,
+        model_path=None,
+        status="completed",
+        duration_seconds=None,
     ):
 
         if roi is not None:
-
             if len(roi) != 4:
-
                 raise ValueError(
                     "ROI must contain X1, Y1, X2, Y2."
                 )
@@ -47,7 +71,6 @@ class DatabaseService:
             roi_enabled = True
 
         else:
-
             roi_x1 = None
             roi_y1 = None
             roi_x2 = None
@@ -58,6 +81,7 @@ class DatabaseService:
 
         return self.database.create_segmentation_run(
             run_name=run_name,
+            media_id=media_id,
             source_file=source_file,
             source_path=source_path,
             capture_date=capture_date,
@@ -70,43 +94,27 @@ class DatabaseService:
             roi_x1=roi_x1,
             roi_y1=roi_y1,
             roi_x2=roi_x2,
-            roi_y2=roi_y2
+            roi_y2=roi_y2,
+            model_name=model_name,
+            model_path=model_path,
+            status=status,
+            duration_seconds=duration_seconds,
         )
 
-    def get_run(
-        self,
-        run_id
-    ):
+    def get_run(self, run_id):
+        return self.database.get_segmentation_run(run_id)
 
-        return self.database.get_segmentation_run(
-            run_id
-        )
-
-    def list_runs(
-        self
-    ):
-
+    def list_runs(self):
         return self.database.list_segmentation_runs()
 
-    def update_run(
-        self,
-        run_id,
-        **fields
-    ):
-
+    def update_run(self, run_id, **fields):
         return self.database.update_segmentation_run(
             run_id,
             **fields
         )
 
-    def delete_run(
-        self,
-        run_id
-    ):
-
-        return self.database.delete_segmentation_run(
-            run_id
-        )
+    def delete_run(self, run_id):
+        return self.database.delete_segmentation_run(run_id)
 
     def create_leaf(
         self,
@@ -121,12 +129,15 @@ class DatabaseService:
         width,
         height,
         area,
+        confidence=None,
+        selected=False,
+        saved=False,
         original_path=None,
         highlighted_path=None,
         segmented_path=None,
         crop_path=None,
         overlay_path=None,
-        mask_path=None
+        mask_path=None,
     ):
 
         return self.database.create_leaf(
@@ -141,61 +152,36 @@ class DatabaseService:
             width=width,
             height=height,
             area=area,
+            confidence=confidence,
+            selected=selected,
+            saved=saved,
             original_path=original_path,
             highlighted_path=highlighted_path,
             segmented_path=segmented_path,
             crop_path=crop_path,
             overlay_path=overlay_path,
-            mask_path=mask_path
+            mask_path=mask_path,
         )
 
-    def get_leaf(
-        self,
-        leaf_id
-    ):
+    def get_leaf(self, leaf_id):
+        return self.database.get_leaf(leaf_id)
 
-        return self.database.get_leaf(
-            leaf_id
-        )
+    def list_leaves(self, run_id):
+        return self.database.list_leaves_by_run(run_id)
 
-    def list_leaves(
-        self,
-        run_id
-    ):
-
-        return self.database.list_leaves_by_run(
-            run_id
-        )
-
-    def update_leaf(
-        self,
-        leaf_id,
-        **fields
-    ):
-
+    def update_leaf(self, leaf_id, **fields):
         return self.database.update_leaf(
             leaf_id,
             **fields
         )
 
-    def delete_leaf(
-        self,
-        leaf_id
-    ):
-
-        return self.database.delete_leaf(
-            leaf_id
-        )
+    def delete_leaf(self, leaf_id):
+        return self.database.delete_leaf(leaf_id)
 
 
 if __name__ == "__main__":
 
     service = DatabaseService()
 
-    print(
-        "DATABASE SERVICE READY:"
-    )
-
-    print(
-        service.database.database_path
-    )
+    print("DATABASE SERVICE READY:")
+    print(service.database.database_path)
