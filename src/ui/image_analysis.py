@@ -31,18 +31,34 @@ from PySide6.QtWidgets import (
 )
 
 
+UI_DIR = (
+    Path(__file__).resolve().parent
+)
+
 ANALYSIS_DIR = (
-    Path(__file__).resolve().parent.parent
+    UI_DIR.parent
     / "analysis"
 )
 
-sys.path.insert(
-    0,
-    str(ANALYSIS_DIR)
-)
+if str(ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(
+        0,
+        str(ANALYSIS_DIR)
+    )
+
+if str(UI_DIR) not in sys.path:
+    sys.path.insert(
+        0,
+        str(UI_DIR)
+    )
+
 
 from leaf_segmentation.leaf_segmenter import (
     LeafSegmenter
+)
+
+from roi_selector import (
+    ROISelector
 )
 
 
@@ -77,7 +93,9 @@ class PerformanceHistory:
             history_file
         )
 
-    def load(self):
+    def load(
+        self
+    ):
 
         if not self.history_file.exists():
 
@@ -269,7 +287,8 @@ class SegmentationWorker(QObject):
     def __init__(
         self,
         image_path,
-        model_path
+        model_path,
+        roi_rect=None
     ):
 
         super().__init__()
@@ -281,6 +300,8 @@ class SegmentationWorker(QObject):
         self.model_path = Path(
             model_path
         )
+
+        self.roi_rect = roi_rect
 
         self.stop_requested = False
 
@@ -337,7 +358,9 @@ class SegmentationWorker(QObject):
             exist_ok=True
         )
 
-        base_name = self.image_path.stem
+        base_name = (
+            self.image_path.stem
+        )
 
         timestamp = datetime.now().strftime(
             "%Y%m%d_%H%M%S_%f"
@@ -362,6 +385,7 @@ class SegmentationWorker(QObject):
             "masks",
             "leaves",
             "overlay",
+            "roi",
         ):
 
             (
@@ -392,17 +416,274 @@ class SegmentationWorker(QObject):
 
         return run_directory
 
+    def prepare_input(
+        self,
+        image,
+        run_directory
+    ):
+
+        height, width = (
+            image.shape[:2]
+        )
+
+        if self.roi_rect is None:
+
+            return (
+                image,
+                0,
+                0,
+                width,
+                height,
+                None
+            )
+
+        x1, y1, x2, y2 = (
+            self.roi_rect
+        )
+
+        x1 = max(
+            0,
+            min(
+                x1,
+                width - 1
+            )
+        )
+
+        y1 = max(
+            0,
+            min(
+                y1,
+                height - 1
+            )
+        )
+
+        x2 = max(
+            x1,
+            min(
+                x2,
+                width - 1
+            )
+        )
+
+        y2 = max(
+            y1,
+            min(
+                y2,
+                height - 1
+            )
+        )
+
+        roi = image[
+            y1:y2 + 1,
+            x1:x2 + 1
+        ]
+
+        if roi.size == 0:
+
+            raise ValueError(
+                "Selected ROI is empty."
+            )
+
+        roi_path = (
+            run_directory
+            / "roi"
+            / "roi.png"
+        )
+
+        if not cv2.imwrite(
+            str(roi_path),
+            roi
+        ):
+
+            raise IOError(
+                f"Failed to save ROI:\n"
+                f"{roi_path}"
+            )
+
+        self.log(
+            "ROI selected."
+        )
+
+        self.log(
+            (
+                f"ROI coordinates: "
+                f"({x1},{y1}) - "
+                f"({x2},{y2})"
+            )
+        )
+
+        self.log(
+            (
+                f"ROI size: "
+                f"{x2 - x1 + 1} x "
+                f"{y2 - y1 + 1}"
+            )
+        )
+
+        return (
+            roi,
+            x1,
+            y1,
+            x2 - x1 + 1,
+            y2 - y1 + 1,
+            roi_path
+        )
+
+    def convert_leaf_to_original(
+        self,
+        leaf,
+        offset_x,
+        offset_y,
+        full_width,
+        full_height
+    ):
+
+        roi_mask = leaf[
+            "mask"
+        ]
+
+        roi_height, roi_width = (
+            roi_mask.shape[:2]
+        )
+
+        import numpy as np
+
+        full_mask = np.zeros(
+            (
+                full_height,
+                full_width
+            ),
+            dtype=roi_mask.dtype
+        )
+
+        paste_height = min(
+            roi_height,
+            full_height - offset_y
+        )
+
+        paste_width = min(
+            roi_width,
+            full_width - offset_x
+        )
+
+        if (
+            paste_height <= 0
+            or paste_width <= 0
+        ):
+
+            return None
+
+        full_mask[
+            offset_y:
+            offset_y + paste_height,
+            offset_x:
+            offset_x + paste_width
+        ] = roi_mask[
+            :paste_height,
+            :paste_width
+        ]
+
+        x1, y1, x2, y2 = (
+            leaf[
+                "bbox"
+            ]
+        )
+
+        x1 += offset_x
+        y1 += offset_y
+        x2 += offset_x
+        y2 += offset_y
+
+        x1 = max(
+            0,
+            min(
+                x1,
+                full_width - 1
+            )
+        )
+
+        y1 = max(
+            0,
+            min(
+                y1,
+                full_height - 1
+            )
+        )
+
+        x2 = max(
+            x1,
+            min(
+                x2,
+                full_width - 1
+            )
+        )
+
+        y2 = max(
+            y1,
+            min(
+                y2,
+                full_height - 1
+            )
+        )
+
+        area = int(
+            (
+                full_mask > 0
+            ).sum()
+        )
+
+        converted = dict(
+            leaf
+        )
+
+        converted[
+            "mask"
+        ] = full_mask
+
+        converted[
+            "bbox"
+        ] = (
+            x1,
+            y1,
+            x2,
+            y2
+        )
+
+        converted[
+            "area"
+        ] = area
+
+        converted[
+            "width"
+        ] = (
+            x2 - x1 + 1
+        )
+
+        converted[
+            "height"
+        ] = (
+            y2 - y1 + 1
+        )
+
+        converted[
+            "center_x"
+        ] = (
+            x1 + x2
+        ) / 2.0
+
+        converted[
+            "center_y"
+        ] = (
+            y1 + y2
+        ) / 2.0
+
+        return converted
+
     def run(
         self
     ):
 
-        run_directory = None
-
         try:
-
-            # ----------------------------------------------
-            # STEP 1
-            # ----------------------------------------------
 
             self.stage.emit(
                 "STEP 1/8 - Checking input image..."
@@ -421,13 +702,16 @@ class SegmentationWorker(QObject):
                     f"{self.image_path}"
                 )
 
-            height, width = (
+            full_height, full_width = (
                 image.shape[:2]
             )
 
             self.log(
-                f"Image size: "
-                f"{width} x {height}"
+                (
+                    f"Image size: "
+                    f"{full_width} x "
+                    f"{full_height}"
+                )
             )
 
             self.progress.emit(
@@ -436,10 +720,6 @@ class SegmentationWorker(QObject):
 
             if self.check_stop():
                 return
-
-            # ----------------------------------------------
-            # STEP 2
-            # ----------------------------------------------
 
             self.stage.emit(
                 "STEP 2/8 - Checking SAM 2 model..."
@@ -459,10 +739,6 @@ class SegmentationWorker(QObject):
             if self.check_stop():
                 return
 
-            # ----------------------------------------------
-            # STEP 3
-            # ----------------------------------------------
-
             self.stage.emit(
                 "STEP 3/8 - Creating result directory..."
             )
@@ -478,12 +754,47 @@ class SegmentationWorker(QObject):
             if self.check_stop():
                 return
 
-            # ----------------------------------------------
-            # STEP 4
-            # ----------------------------------------------
+            self.stage.emit(
+                "STEP 4/8 - Preparing analysis region..."
+            )
+
+            (
+                analysis_image,
+                offset_x,
+                offset_y,
+                analysis_width,
+                analysis_height,
+                roi_path
+            ) = self.prepare_input(
+                image,
+                run_directory
+            )
+
+            if self.roi_rect is not None:
+
+                self.stage.emit(
+                    (
+                        "ROI selected - "
+                        f"{analysis_width} x "
+                        f"{analysis_height}"
+                    )
+                )
+
+            else:
+
+                self.stage.emit(
+                    "Full image selected."
+                )
+
+            self.progress.emit(
+                20
+            )
+
+            if self.check_stop():
+                return
 
             self.stage.emit(
-                "STEP 4/8 - Loading SAM 2 model..."
+                "STEP 5/8 - Loading SAM 2 model..."
             )
 
             segmenter = LeafSegmenter(
@@ -495,27 +806,35 @@ class SegmentationWorker(QObject):
             segmenter.load_model()
 
             self.progress.emit(
-                20
+                25
             )
 
             if self.check_stop():
                 return
 
-            # ----------------------------------------------
-            # STEP 5
-            # ----------------------------------------------
-
             self.stage.emit(
-                "STEP 5/8 - Running SAM 2 segmentation..."
+                "STEP 6/8 - Running SAM 2 segmentation..."
             )
 
             self.busy.emit(
                 True
             )
 
+            if self.roi_rect is None:
+
+                segmentation_input_path = (
+                    self.image_path
+                )
+
+            else:
+
+                segmentation_input_path = (
+                    roi_path
+                )
+
             leaves = segmenter.segment(
                 str(
-                    self.image_path
+                    segmentation_input_path
                 )
             )
 
@@ -526,13 +845,37 @@ class SegmentationWorker(QObject):
             if self.check_stop():
                 return
 
+            converted_leaves = []
+
+            for leaf in leaves:
+
+                converted = (
+                    self.convert_leaf_to_original(
+                        leaf,
+                        offset_x,
+                        offset_y,
+                        full_width,
+                        full_height
+                    )
+                )
+
+                if converted is not None:
+
+                    converted_leaves.append(
+                        converted
+                    )
+
+            leaves = converted_leaves
+
             total_masks = len(
                 leaves
             )
 
             self.log(
-                f"Inference completed. "
-                f"Masks detected: {total_masks}"
+                (
+                    f"Inference completed. "
+                    f"Masks detected: {total_masks}"
+                )
             )
 
             self.progress.emit(
@@ -546,12 +889,8 @@ class SegmentationWorker(QObject):
                 )
             )
 
-            # ----------------------------------------------
-            # STEP 6
-            # ----------------------------------------------
-
             self.stage.emit(
-                "STEP 6/8 - Processing masks and leaves..."
+                "STEP 7/8 - Processing masks and leaves..."
             )
 
             overlay = image.copy()
@@ -651,32 +990,29 @@ class SegmentationWorker(QObject):
                             f"{leaf_path}"
                         )
 
-                if total_masks > 0:
-
-                    progress = (
-                        65
-                        + int(
-                            (
-                                (index + 1)
-                                / total_masks
+                progress = (
+                    65
+                    + int(
+                        (
+                            (index + 1)
+                            / max(
+                                total_masks,
+                                1
                             )
-                            * 20
                         )
+                        * 20
                     )
+                )
 
-                    self.progress.emit(
-                        progress
-                    )
+                self.progress.emit(
+                    progress
+                )
 
             if self.check_stop():
                 return
 
-            # ----------------------------------------------
-            # STEP 7
-            # ----------------------------------------------
-
             self.stage.emit(
-                "STEP 7/8 - Saving overlay..."
+                "STEP 8/8 - Saving overlay and finalizing..."
             )
 
             overlay_path = (
@@ -694,18 +1030,6 @@ class SegmentationWorker(QObject):
                     f"Failed to save overlay:\n"
                     f"{overlay_path}"
                 )
-
-            self.progress.emit(
-                95
-            )
-
-            # ----------------------------------------------
-            # STEP 8
-            # ----------------------------------------------
-
-            self.stage.emit(
-                "STEP 8/8 - Finalizing results..."
-            )
 
             self.progress.emit(
                 100
@@ -729,8 +1053,11 @@ class SegmentationWorker(QObject):
                     "overlay": str(
                         overlay_path
                     ),
-                    "width": width,
-                    "height": height,
+                    "width": analysis_width,
+                    "height": analysis_height,
+                    "full_width": full_width,
+                    "full_height": full_height,
+                    "roi": self.roi_rect,
                 }
             )
 
@@ -820,9 +1147,17 @@ class ImageAnalysis(QWidget):
 
         self.selected_image = None
 
+        self.original_image_width = None
+
+        self.original_image_height = None
+
+        self.roi_rect = None
+
         self.thread = None
 
         self.worker = None
+
+        self.roi_dialog = None
 
         self.run_start_time = None
 
@@ -928,6 +1263,44 @@ class ImageAnalysis(QWidget):
             preview_group
         )
 
+        region_layout = QHBoxLayout()
+
+        self.partial_region_button = QPushButton(
+            "PARTIAL REGION"
+        )
+
+        self.clear_region_button = QPushButton(
+            "CLEAR REGION"
+        )
+
+        self.region_label = QLabel(
+            "REGION: FULL IMAGE"
+        )
+
+        self.partial_region_button.setEnabled(
+            False
+        )
+
+        self.clear_region_button.setEnabled(
+            False
+        )
+
+        region_layout.addWidget(
+            self.partial_region_button
+        )
+
+        region_layout.addWidget(
+            self.clear_region_button
+        )
+
+        region_layout.addWidget(
+            self.region_label
+        )
+
+        layout.addLayout(
+            region_layout
+        )
+
         segmentation_group = QGroupBox(
             "LEAF SEGMENTATION"
         )
@@ -974,10 +1347,6 @@ class ImageAnalysis(QWidget):
             button_layout
         )
 
-        # --------------------------------------------------
-        # CURRENT OPERATION
-        # --------------------------------------------------
-
         current_label = QLabel(
             "CURRENT OPERATION:"
         )
@@ -1001,10 +1370,6 @@ class ImageAnalysis(QWidget):
         segmentation_layout.addWidget(
             self.status_label
         )
-
-        # --------------------------------------------------
-        # TIME INFORMATION
-        # --------------------------------------------------
 
         timing_group = QGroupBox(
             "PROCESSING TIME"
@@ -1058,10 +1423,6 @@ class ImageAnalysis(QWidget):
             timing_group
         )
 
-        # --------------------------------------------------
-        # ACTIVITY LOG
-        # --------------------------------------------------
-
         log_label = QLabel(
             "ACTIVITY LOG:"
         )
@@ -1091,10 +1452,6 @@ class ImageAnalysis(QWidget):
         segmentation_layout.addWidget(
             self.stage_log
         )
-
-        # --------------------------------------------------
-        # PROGRESS
-        # --------------------------------------------------
 
         progress_label = QLabel(
             "PROGRESS:"
@@ -1132,6 +1489,14 @@ class ImageAnalysis(QWidget):
 
         self.select_button.clicked.connect(
             self.select_image
+        )
+
+        self.partial_region_button.clicked.connect(
+            self.open_partial_region
+        )
+
+        self.clear_region_button.clicked.connect(
+            self.clear_region
         )
 
         self.segment_button.clicked.connect(
@@ -1237,12 +1602,45 @@ class ImageAnalysis(QWidget):
                 file_path
             )
 
+            image = cv2.imread(
+                str(
+                    self.selected_image
+                )
+            )
+
+            if image is None:
+
+                raise ValueError(
+                    f"Could not read image:\n"
+                    f"{self.selected_image}"
+                )
+
+            self.original_image_height, (
+                self.original_image_width
+            ) = image.shape[:2]
+
             self.image_name_label.setText(
                 self.selected_image.name
             )
 
-            self.show_image(
-                self.selected_image
+            self.roi_rect = None
+
+            self.image_preview.setPixmap(
+                QPixmap(
+                    str(
+                        self.selected_image
+                    )
+                )
+            )
+
+            self.update_image_preview()
+
+            self.partial_region_button.setEnabled(
+                True
+            )
+
+            self.clear_region_button.setEnabled(
+                False
             )
 
             self.segment_button.setEnabled(
@@ -1257,10 +1655,21 @@ class ImageAnalysis(QWidget):
                 "Image selected - ready"
             )
 
+            self.region_label.setText(
+                "REGION: FULL IMAGE"
+            )
+
             self.stage_log.clear()
 
             self.add_stage_message(
                 "Image selected successfully."
+            )
+
+            self.add_stage_message(
+                (
+                    "Choose PARTIAL REGION or "
+                    "run segmentation on the full image."
+                )
             )
 
             self.start_time_label.setText(
@@ -1298,30 +1707,164 @@ class ImageAnalysis(QWidget):
                 exc
             )
 
-    def show_image(
-        self,
-        image_path
+    def open_partial_region(
+        self
     ):
 
-        pixmap = QPixmap(
-            str(image_path)
-        )
+        if self.selected_image is None:
 
-        if pixmap.isNull():
-
-            raise ValueError(
-                f"Could not load image:\n"
-                f"{image_path}"
+            QMessageBox.warning(
+                self,
+                "PARTIAL REGION",
+                "Please select an image first."
             )
 
-        self.update_image_preview(
-            pixmap
+            return
+
+        if self.thread is not None:
+
+            return
+
+        try:
+
+            self.status_label.setText(
+                "Waiting for region selection..."
+            )
+
+            self.add_stage_message(
+                (
+                    "Opening PARTIAL REGION "
+                    "selection window."
+                )
+            )
+
+            self.roi_dialog = ROISelector(
+                str(
+                    self.selected_image
+                ),
+                self
+            )
+
+            self.roi_dialog.confirmed.connect(
+                self.on_roi_confirmed
+            )
+
+            self.roi_dialog.cancelled.connect(
+                self.on_roi_cancelled
+            )
+
+            self.roi_dialog.exec()
+
+        except Exception as exc:
+
+            self.roi_dialog = None
+
+            self.handle_error(
+                "PARTIAL REGION ERROR",
+                exc
+            )
+
+    def on_roi_confirmed(
+        self,
+        roi
+    ):
+
+        self.roi_rect = tuple(
+            roi
+        )
+
+        x1, y1, x2, y2 = (
+            self.roi_rect
+        )
+
+        roi_width = (
+            x2 - x1 + 1
+        )
+
+        roi_height = (
+            y2 - y1 + 1
+        )
+
+        self.region_label.setText(
+            (
+                "REGION: "
+                f"X1={x1} "
+                f"Y1={y1} "
+                f"X2={x2} "
+                f"Y2={y2} "
+                f"| SIZE={roi_width}x{roi_height}"
+            )
+        )
+
+        self.clear_region_button.setEnabled(
+            True
+        )
+
+        self.add_stage_message(
+            (
+                "ROI confirmed: "
+                f"({x1},{y1}) - "
+                f"({x2},{y2})"
+            )
+        )
+
+        self.status_label.setText(
+            "ROI confirmed - starting segmentation..."
+        )
+
+        self.roi_dialog = None
+
+        self.run_segmentation()
+
+    def on_roi_cancelled(
+        self
+    ):
+
+        self.roi_dialog = None
+
+        self.status_label.setText(
+            "ROI selection cancelled."
+        )
+
+        self.add_stage_message(
+            "ROI selection cancelled."
+        )
+
+    def clear_region(
+        self
+    ):
+
+        self.roi_rect = None
+
+        self.clear_region_button.setEnabled(
+            False
+        )
+
+        self.region_label.setText(
+            "REGION: FULL IMAGE"
+        )
+
+        self.status_label.setText(
+            "Full image selected"
+        )
+
+        self.add_stage_message(
+            "ROI cleared - full image will be analyzed."
         )
 
     def update_image_preview(
-        self,
-        pixmap
+        self
     ):
+
+        if self.selected_image is None:
+
+            return
+
+        pixmap = QPixmap(
+            str(
+                self.selected_image
+            )
+        )
 
         if pixmap.isNull():
 
@@ -1330,7 +1873,7 @@ class ImageAnalysis(QWidget):
         scaled_pixmap = pixmap.scaled(
             self.image_preview.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            Qt.TransformationMode.SmoothTransformation
         )
 
         self.image_preview.setPixmap(
@@ -1346,19 +1889,7 @@ class ImageAnalysis(QWidget):
             event
         )
 
-        if self.selected_image is not None:
-
-            pixmap = QPixmap(
-                str(
-                    self.selected_image
-                )
-            )
-
-            if not pixmap.isNull():
-
-                self.update_image_preview(
-                    pixmap
-                )
+        self.update_image_preview()
 
     def run_segmentation(
         self
@@ -1377,10 +1908,6 @@ class ImageAnalysis(QWidget):
         if self.thread is not None:
 
             return
-
-        # --------------------------------------------------
-        # READ IMAGE DIMENSIONS
-        # --------------------------------------------------
 
         image = cv2.imread(
             str(
@@ -1402,6 +1929,35 @@ class ImageAnalysis(QWidget):
             image.shape[:2]
         )
 
+        if self.roi_rect is not None:
+
+            x1, y1, x2, y2 = (
+                self.roi_rect
+            )
+
+            estimate_width = (
+                x2 - x1 + 1
+            )
+
+            estimate_height = (
+                y2 - y1 + 1
+            )
+
+            analysis_description = (
+                f"ROI {estimate_width}x"
+                f"{estimate_height}"
+            )
+
+        else:
+
+            estimate_width = width
+
+            estimate_height = height
+
+            analysis_description = (
+                f"FULL IMAGE {width}x{height}"
+            )
+
         extension = (
             self.selected_image.suffix.lower()
         )
@@ -1414,14 +1970,10 @@ class ImageAnalysis(QWidget):
             self.performance_history.estimate_duration(
                 model_name,
                 extension,
-                width,
-                height
+                estimate_width,
+                estimate_height
             )
         )
-
-        # --------------------------------------------------
-        # START TIME
-        # --------------------------------------------------
 
         self.run_start_time = datetime.now()
 
@@ -1460,25 +2012,34 @@ class ImageAnalysis(QWidget):
         self.estimate_basis_label.setText(
             (
                 "ESTIMATE BASIS: "
-                f"{width}x{height} | "
-                f"{(width * height) / 1_000_000:.2f} MP | "
+                f"{analysis_description} | "
+                f"{estimate_width * estimate_height / 1_000_000:.2f} MP | "
                 f"{model_name}"
             )
         )
 
         self.timer.start()
 
-        # --------------------------------------------------
-        # UI
-        # --------------------------------------------------
-
         self.stage_log.clear()
 
         self.add_stage_message(
-            (
-                "Starting leaf segmentation..."
-            )
+            "Starting leaf segmentation..."
         )
+
+        if self.roi_rect is not None:
+
+            self.add_stage_message(
+                (
+                    "Using selected ROI: "
+                    f"{self.roi_rect}"
+                )
+            )
+
+        else:
+
+            self.add_stage_message(
+                "Using full image."
+            )
 
         self.status_label.setText(
             "Starting..."
@@ -1496,6 +2057,14 @@ class ImageAnalysis(QWidget):
             False
         )
 
+        self.partial_region_button.setEnabled(
+            False
+        )
+
+        self.clear_region_button.setEnabled(
+            False
+        )
+
         self.segment_button.setEnabled(
             False
         )
@@ -1505,13 +2074,10 @@ class ImageAnalysis(QWidget):
         )
 
         self.log(
-            f"Starting segmentation: "
-            f"{self.selected_image}"
-        )
-
-        self.log(
-            "Estimated total time: "
-            f"{self.format_duration(self.estimated_total_seconds)}"
+            (
+                f"Starting segmentation: "
+                f"{self.selected_image}"
+            )
         )
 
         self.thread = QThread()
@@ -1522,7 +2088,8 @@ class ImageAnalysis(QWidget):
             ),
             model_path=str(
                 MODEL_PATH
-            )
+            ),
+            roi_rect=self.roi_rect
         )
 
         self.worker.moveToThread(
@@ -1583,17 +2150,8 @@ class ImageAnalysis(QWidget):
         self
     ):
 
-        return self.model_path_name(
-            MODEL_PATH
-        )
-
-    def model_path_name(
-        self,
-        path
-    ):
-
         return Path(
-            path
+            MODEL_PATH
         ).name
 
     def update_runtime_display(
@@ -1627,19 +2185,13 @@ class ImageAnalysis(QWidget):
             - elapsed
         )
 
-        if remaining < 0:
-
-            remaining_display = (
-                "00:00"
+        remaining_display = (
+            "00:00"
+            if remaining < 0
+            else self.format_duration(
+                remaining
             )
-
-        else:
-
-            remaining_display = (
-                self.format_duration(
-                    remaining
-                )
-            )
+        )
 
         estimated_end = (
             self.run_start_time
@@ -1822,6 +2374,17 @@ class ImageAnalysis(QWidget):
             )
         )
 
+        if result.get(
+            "roi"
+        ) is not None:
+
+            self.add_stage_message(
+                (
+                    "ANALYZED ROI: "
+                    f"{result['roi']}"
+                )
+            )
+
         self.add_stage_message(
             (
                 "RESULT DIRECTORY: "
@@ -1977,8 +2540,16 @@ class ImageAnalysis(QWidget):
             True
         )
 
+        self.partial_region_button.setEnabled(
+            self.selected_image is not None
+        )
+
         self.segment_button.setEnabled(
             self.selected_image is not None
+        )
+
+        self.clear_region_button.setEnabled(
+            self.roi_rect is not None
         )
 
         self.stop_button.setEnabled(
