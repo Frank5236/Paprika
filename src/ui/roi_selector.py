@@ -20,13 +20,16 @@ class ROIImageLabel(QLabel):
     roi_selected = Signal(tuple)
 
     def __init__(self, parent=None):
+
         super().__init__(parent)
 
         self.setAlignment(
             Qt.AlignmentFlag.AlignCenter
         )
 
-        self.setMouseTracking(True)
+        self.setMouseTracking(
+            True
+        )
 
         self.setCursor(
             Qt.CursorShape.CrossCursor
@@ -43,11 +46,16 @@ class ROIImageLabel(QLabel):
         self.original_width = 0
         self.original_height = 0
 
+        self.original_pixmap = QPixmap()
+
         self.displayed_pixmap_rect = QRect()
 
         self.selected_roi = None
 
-    def set_image(self, pixmap):
+    def set_image(
+        self,
+        pixmap
+    ):
 
         if pixmap.isNull():
             return
@@ -55,11 +63,63 @@ class ROIImageLabel(QLabel):
         self.original_width = pixmap.width()
         self.original_height = pixmap.height()
 
-        self.setPixmap(pixmap)
+        self.original_pixmap = pixmap.copy()
 
-        self.update_display_rect()
+        self.set_display_pixmap()
 
-    def update_display_rect(self):
+    def set_display_pixmap(
+        self
+    ):
+
+        if self.original_pixmap.isNull():
+
+            self.displayed_pixmap_rect = QRect()
+            self.clear()
+            return
+
+        available_width = max(
+            1,
+            self.width() - 2
+        )
+
+        available_height = max(
+            1,
+            self.height() - 2
+        )
+
+        scaled = self.original_pixmap.scaled(
+            available_width,
+            available_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+        self.setPixmap(
+            scaled
+        )
+
+        x = (
+            self.width()
+            - scaled.width()
+        ) // 2
+
+        y = (
+            self.height()
+            - scaled.height()
+        ) // 2
+
+        self.displayed_pixmap_rect = QRect(
+            x,
+            y,
+            scaled.width(),
+            scaled.height()
+        )
+
+        self.update()
+
+    def update_display_rect(
+        self
+    ):
 
         pixmap = self.pixmap()
 
@@ -90,7 +150,9 @@ class ROIImageLabel(QLabel):
 
         self.update()
 
-    def clear_selection(self):
+    def clear_selection(
+        self
+    ):
 
         self.selection_start = None
         self.selection_end = None
@@ -100,13 +162,32 @@ class ROIImageLabel(QLabel):
 
         self.update()
 
-    def resizeEvent(self, event):
+    def resizeEvent(
+        self,
+        event
+    ):
 
-        super().resizeEvent(event)
+        super().resizeEvent(
+            event
+        )
 
-        self.update_display_rect()
+        if not self.original_pixmap.isNull():
+            self.set_display_pixmap()
+        else:
+            self.update_display_rect()
 
-    def mousePressEvent(self, event):
+        if self.selected_roi is not None:
+            self.rubber_band.setGeometry(
+                self.original_to_display_rect(
+                    self.selected_roi
+                )
+            )
+            self.rubber_band.show()
+
+    def mousePressEvent(
+        self,
+        event
+    ):
 
         if (
             event.button()
@@ -136,15 +217,13 @@ class ROIImageLabel(QLabel):
 
         self.rubber_band.show()
 
-    def mouseMoveEvent(self, event):
-
-        if self.selection_start is None:
-            return
+    def clamp_display_point(
+        self,
+        point
+    ):
 
         if self.displayed_pixmap_rect.isNull():
-            return
-
-        point = event.position().toPoint()
+            return point
 
         point.setX(
             max(
@@ -164,6 +243,25 @@ class ROIImageLabel(QLabel):
                     self.displayed_pixmap_rect.bottom()
                 )
             )
+        )
+
+        return point
+
+    def mouseMoveEvent(
+        self,
+        event
+    ):
+
+        if self.selection_start is None:
+            return
+
+        if self.displayed_pixmap_rect.isNull():
+            return
+
+        point = event.position().toPoint()
+
+        point = self.clamp_display_point(
+            point
         )
 
         self.selection_end = point
@@ -177,7 +275,10 @@ class ROIImageLabel(QLabel):
             rectangle
         )
 
-    def mouseReleaseEvent(self, event):
+    def mouseReleaseEvent(
+        self,
+        event
+    ):
 
         if (
             event.button()
@@ -188,26 +289,13 @@ class ROIImageLabel(QLabel):
         if self.selection_start is None:
             return
 
+        if self.displayed_pixmap_rect.isNull():
+            return
+
         point = event.position().toPoint()
 
-        point.setX(
-            max(
-                self.displayed_pixmap_rect.left(),
-                min(
-                    point.x(),
-                    self.displayed_pixmap_rect.right()
-                )
-            )
-        )
-
-        point.setY(
-            max(
-                self.displayed_pixmap_rect.top(),
-                min(
-                    point.y(),
-                    self.displayed_pixmap_rect.bottom()
-                )
-            )
+        point = self.clamp_display_point(
+            point
         )
 
         self.selection_end = point
@@ -237,14 +325,21 @@ class ROIImageLabel(QLabel):
         self.selected_roi = roi
 
         self.rubber_band.setGeometry(
-            display_rect
+            self.original_to_display_rect(
+                roi
+            )
         )
+
+        self.rubber_band.show()
 
         self.roi_selected.emit(
             roi
         )
 
-    def display_to_original(self, display_rect):
+    def display_to_original(
+        self,
+        display_rect
+    ):
 
         if self.displayed_pixmap_rect.isNull():
             return None
@@ -255,13 +350,11 @@ class ROIImageLabel(QLabel):
         ):
             return None
 
-        display_width = (
-            self.displayed_pixmap_rect.width()
-        )
+        display_width = self.displayed_pixmap_rect.width()
+        display_height = self.displayed_pixmap_rect.height()
 
-        display_height = (
-            self.displayed_pixmap_rect.height()
-        )
+        if display_width <= 0 or display_height <= 0:
+            return None
 
         scale_x = (
             self.original_width
@@ -273,40 +366,72 @@ class ROIImageLabel(QLabel):
             / display_height
         )
 
-        relative_x = (
+        relative_left = (
             display_rect.left()
             - self.displayed_pixmap_rect.left()
         )
 
-        relative_y = (
+        relative_top = (
             display_rect.top()
             - self.displayed_pixmap_rect.top()
         )
 
+        relative_right = (
+            display_rect.right()
+            - self.displayed_pixmap_rect.left()
+        )
+
+        relative_bottom = (
+            display_rect.bottom()
+            - self.displayed_pixmap_rect.top()
+        )
+
+        relative_left = max(
+            0,
+            min(
+                relative_left,
+                display_width - 1
+            )
+        )
+
+        relative_top = max(
+            0,
+            min(
+                relative_top,
+                display_height - 1
+            )
+        )
+
+        relative_right = max(
+            0,
+            min(
+                relative_right,
+                display_width - 1
+            )
+        )
+
+        relative_bottom = max(
+            0,
+            min(
+                relative_bottom,
+                display_height - 1
+            )
+        )
+
         x1 = int(
-            relative_x * scale_x
+            relative_left * scale_x
         )
 
         y1 = int(
-            relative_y * scale_y
+            relative_top * scale_y
         )
 
         x2 = int(
-            (
-                relative_x
-                + display_rect.width()
-                - 1
-            )
-            * scale_x
+            relative_right * scale_x
         )
 
         y2 = int(
-            (
-                relative_y
-                + display_rect.height()
-                - 1
-            )
-            * scale_y
+            relative_bottom * scale_y
         )
 
         x1 = max(
@@ -348,25 +473,21 @@ class ROIImageLabel(QLabel):
             y2
         )
 
-    def paintEvent(self, event):
-
-        super().paintEvent(event)
-
-        if self.selected_roi is None:
-            return
+    def original_to_display_rect(
+        self,
+        roi
+    ):
 
         if self.displayed_pixmap_rect.isNull():
-            return
+            return QRect()
 
         if (
             self.original_width <= 0
             or self.original_height <= 0
         ):
-            return
+            return QRect()
 
-        x1, y1, x2, y2 = (
-            self.selected_roi
-        )
+        x1, y1, x2, y2 = roi
 
         scale_x = (
             self.displayed_pixmap_rect.width()
@@ -378,49 +499,76 @@ class ROIImageLabel(QLabel):
             / self.original_height
         )
 
-        display_x = (
+        display_x1 = (
             self.displayed_pixmap_rect.left()
             + int(x1 * scale_x)
         )
 
-        display_y = (
+        display_y1 = (
             self.displayed_pixmap_rect.top()
             + int(y1 * scale_y)
         )
 
-        display_width = max(
-            1,
-            int(
-                (x2 - x1 + 1)
-                * scale_x
+        display_x2 = (
+            self.displayed_pixmap_rect.left()
+            + int(x2 * scale_x)
+        )
+
+        display_y2 = (
+            self.displayed_pixmap_rect.top()
+            + int(y2 * scale_y)
+        )
+
+        return QRect(
+            display_x1,
+            display_y1,
+            max(
+                1,
+                display_x2 - display_x1 + 1
+            ),
+            max(
+                1,
+                display_y2 - display_y1 + 1
             )
         )
 
-        display_height = max(
-            1,
-            int(
-                (y2 - y1 + 1)
-                * scale_y
-            )
+    def paintEvent(
+        self,
+        event
+    ):
+
+        super().paintEvent(
+            event
         )
 
-        painter = QPainter(self)
+        if self.selected_roi is None:
+            return
+
+        if self.displayed_pixmap_rect.isNull():
+            return
+
+        rectangle = self.original_to_display_rect(
+            self.selected_roi
+        )
+
+        painter = QPainter(
+            self
+        )
 
         pen = QPen(
             Qt.GlobalColor.green
         )
 
-        pen.setWidth(3)
+        pen.setWidth(
+            3
+        )
 
-        painter.setPen(pen)
+        painter.setPen(
+            pen
+        )
 
         painter.drawRect(
-            QRect(
-                display_x,
-                display_y,
-                display_width,
-                display_height
-            )
+            rectangle
         )
 
         painter.end()
@@ -436,7 +584,10 @@ class ROISelector(QDialog):
         image_path,
         parent=None
     ):
-        super().__init__(parent)
+
+        super().__init__(
+            parent
+        )
 
         self.image_path = Path(
             image_path
@@ -453,15 +604,20 @@ class ROISelector(QDialog):
             800
         )
 
-        self.setModal(True)
+        self.setModal(
+            True
+        )
 
         self.create_ui()
-
         self.load_image()
 
-    def create_ui(self):
+    def create_ui(
+        self
+    ):
 
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout(
+            self
+        )
 
         title = QLabel(
             "SELECT REGION FOR LEAF SEGMENTATION"
@@ -472,16 +628,25 @@ class ROISelector(QDialog):
             "font-weight: bold;"
         )
 
-        layout.addWidget(title)
+        layout.addWidget(
+            title
+        )
 
         instruction = QLabel(
             "Drag a rectangle around the area "
             "you want to analyze."
         )
 
-        layout.addWidget(instruction)
+        layout.addWidget(
+            instruction
+        )
 
         self.image_label = ROIImageLabel()
+
+        self.image_label.setMinimumSize(
+            400,
+            300
+        )
 
         self.image_label.setStyleSheet(
             "border: 1px solid gray;"
@@ -555,7 +720,9 @@ class ROISelector(QDialog):
             self.confirm_selection
         )
 
-    def load_image(self):
+    def load_image(
+        self
+    ):
 
         if not self.image_path.exists():
 
@@ -569,7 +736,6 @@ class ROISelector(QDialog):
             )
 
             self.reject()
-
             return
 
         pixmap = QPixmap(
@@ -588,18 +754,10 @@ class ROISelector(QDialog):
             )
 
             self.reject()
-
             return
 
-        scaled = pixmap.scaled(
-            1040,
-            620,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-
         self.image_label.set_image(
-            scaled
+            pixmap
         )
 
     def on_roi_selected(
@@ -634,7 +792,9 @@ class ROISelector(QDialog):
             True
         )
 
-    def reset_selection(self):
+    def reset_selection(
+        self
+    ):
 
         self.selected_roi = None
 
@@ -648,7 +808,9 @@ class ROISelector(QDialog):
             False
         )
 
-    def confirm_selection(self):
+    def confirm_selection(
+        self
+    ):
 
         if self.selected_roi is None:
 
@@ -666,10 +828,11 @@ class ROISelector(QDialog):
 
         self.accept()
 
-    def cancel_selection(self):
+    def cancel_selection(
+        self
+    ):
 
         self.cancelled.emit()
-
         self.reject()
 
 
